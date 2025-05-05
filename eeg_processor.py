@@ -245,10 +245,15 @@ def main():
         
         if uploaded_file is not None:
             # Only read the data once and store in session_state
+            # Update this line in your main() function, inside the Preprocess Single User Data section
             if st.session_state.df is None:
                 with st.spinner("Loading data... (this may take a while for large files)"):
-                    st.session_state.df = pd.read_csv(uploaded_file)
-                
+                    try:
+                        # Add low_memory=False to handle mixed data types
+                        st.session_state.df = pd.read_csv(uploaded_file, low_memory=False)
+                    except Exception as e:
+                        st.error(f"Error loading file: {str(e)}")
+                        st.stop()  # Stop execution if file loading fails
             df = st.session_state.df
             
             # Show sample of raw data
@@ -389,10 +394,14 @@ def main():
                 try:
                     with st.spinner("Combining datasets..."):
                         dataframes = []
+                        # Update in the Combine Datasets button handler as well
                         for file in uploaded_files:
-                            df = pd.read_csv(file)
-                            dataframes.append(df)
-                            
+                            try:
+                                df = pd.read_csv(file, low_memory=False)  # Add low_memory=False
+                                dataframes.append(df)
+                            except Exception as e:
+                                st.error(f"Error loading {file.name}: {str(e)}")
+                                continue  # Skip problematic files
                         combined_df = combine_multiple_users(dataframes)
                     
                     st.success("Combination complete!")
