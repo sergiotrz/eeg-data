@@ -243,7 +243,23 @@ def main():
         # Upload file
         uploaded_file = st.file_uploader("Upload CSV file with raw EEG data", type=["csv"])
         
+        # Add Clear All Files button with automatic refresh
+        if st.button("Clear All Files"):
+            # Clear all session state variables
+            for key in list(st.session_state.keys()):
+                if key != 'uploader_key':  # Don't delete the uploader key
+                    del st.session_state[key]
+            
+            # Increment the uploader key to force a new uploader widget
+            st.session_state.uploader_key += 1
+            st.success("Files cleared successfully!")
+            
+            # Force Streamlit to rerun the script
+            st.rerun()
+        
         if uploaded_file is not None:
+            # Rest of your code remains the same
+            # ...
             # Only read the data once and store in session_state
             # Update this line in your main() function, inside the Preprocess Single User Data section
             if st.session_state.df is None:
