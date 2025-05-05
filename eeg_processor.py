@@ -12,7 +12,7 @@ if not os.path.exists('.streamlit'):
     os.makedirs('.streamlit')
     with open('.streamlit/config.toml', 'w') as f:
         f.write('[server]\n')
-        f.write('maxUploadSize = 1000\n')
+        f.write('maxUploadSize = 5000\n')
 
 def preprocess_single_user(df, user_num, start_timestamp, end_timestamp, section_timestamps):
     """
