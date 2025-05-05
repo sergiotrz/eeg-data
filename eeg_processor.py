@@ -110,7 +110,7 @@ def preprocess_single_user(df, user_num, start_timestamp, end_timestamp, section
     df_copy = df.copy()
     
     # Convert Time to datetime and set as index
-    df_copy['Time'] = pd.to_datetime(df_copy['Time'])
+    df_copy['Time'] = pd.to_datetime(df_copy['Time'], format='%H:%M:%S.%f')
     df_copy.set_index('Time', inplace=True)
     
     # Separate numeric and non-numeric columns
