@@ -7,12 +7,16 @@ import tempfile
 from datetime import datetime
 import io
 
-# Create .streamlit directory and config.toml file for increased upload limit
-if not os.path.exists('.streamlit'):
-    os.makedirs('.streamlit')
-    with open('.streamlit/config.toml', 'w') as f:
-        f.write('[server]\n')
-        f.write('maxUploadSize = 5000\n')
+# REMOVE THIS SECTION - Not needed for cloud deployment and can cause crashes
+# if not os.path.exists('.streamlit'):
+#     os.makedirs('.streamlit')
+#     with open('.streamlit/config.toml', 'w') as f:
+#         f.write('[server]\n')
+#         f.write('maxUploadSize = 5000\n')
+
+# Instead, use Streamlit's built-in server settings
+# This is done through a separate .streamlit/config.toml file in your repo
+# Or through environment variables in your cloud provider
 
 def preprocess_single_user(df, user_num, start_timestamp, end_timestamp, section_timestamps):
     """
