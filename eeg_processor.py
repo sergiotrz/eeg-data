@@ -18,7 +18,7 @@ import io
 # This is done through a separate .streamlit/config.toml file in your repo
 # Or through environment variables in your cloud provider
 
-def preprocess_single_user(df, user_num, start_timestamp, end_timestamp, section_timestamps):
+def preprocess_single_user(df, user_num, start_timestamp, end_timestamp, section_timestamps=None):
     """
     Preprocess data for a single user.
     """
@@ -138,17 +138,18 @@ def preprocess_single_user(df, user_num, start_timestamp, end_timestamp, section
     # Step 9: Add Section column
     status_text.text("Step 9/9: Adding Section column")
     
-    # Add Section column based on timestamps
-    for i, (section_start, section_end) in enumerate(section_timestamps):
-        df_final.loc[(df_final['TimeStamp'] >= section_start) & 
-                   (df_final['TimeStamp'] <= section_end), 'Section'] = i
-    
-    # Reorder columns
-    cols = df_final.columns.tolist()
-    if 'Section' in cols:
-        cols.remove('Section')
-        cols.insert(3, 'Section')
-        df_final = df_final[cols]
+    # Add Section column based on timestamps if section_timestamps is provided
+    if section_timestamps:
+        for i, (section_start, section_end) in enumerate(section_timestamps):
+            df_final.loc[(df_final['TimeStamp'] >= section_start) & 
+                       (df_final['TimeStamp'] <= section_end), 'Section'] = i
+        
+        # Reorder columns
+        cols = df_final.columns.tolist()
+        if 'Section' in cols:
+            cols.remove('Section')
+            cols.insert(3, 'Section')
+            df_final = df_final[cols]
     
     # Remove NaNs
     df_final = df_final.dropna()
@@ -203,7 +204,7 @@ def main():
     
     st.title("EEG Data Processor")
     
-        # Add author attribution
+    # Add author attribution
     st.markdown("""
     *Created by [Sergio Noé Torres-Rodríguez](https://github.com/sergiotrz)*
     
@@ -233,22 +234,21 @@ def main():
     - Resampling data to one row per second
     - Adding section markers based on timestamps
     
-    Please select an option below to begin.
+    Select a tab below to begin.
     """)
     
-    option = st.radio(
-        "Choose an operation:",
-        ("Preprocess Single User Data", "Combine Multiple Preprocessed Datasets")
-    )
+    # Create tabs instead of radio button
+    tab1, tab2 = st.tabs(["Preprocess Single User Data", "Combine Multiple Preprocessed Datasets"])
     
-    if option == "Preprocess Single User Data":
+    # Tab 1: Preprocess Single User Data
+    with tab1:
         st.header("Preprocess Single User Data")
         
         # Upload file
-        uploaded_file = st.file_uploader("Upload CSV file with raw EEG data", type=["csv"])
+        uploaded_file = st.file_uploader("Upload CSV file with raw EEG data", type=["csv"], key="single_user_upload")
         
         # Add Clear All Files button with automatic refresh
-        if st.button("Clear All Files"):
+        if st.button("Clear All Files", key="clear_single"):
             # Clear all session state variables
             for key in list(st.session_state.keys()):
                 if key != 'uploader_key':  # Don't delete the uploader key
@@ -262,10 +262,7 @@ def main():
             st.rerun()
         
         if uploaded_file is not None:
-            # Rest of your code remains the same
-            # ...
             # Only read the data once and store in session_state
-            # Update this line in your main() function, inside the Preprocess Single User Data section
             if st.session_state.df is None:
                 with st.spinner("Loading data... (this may take a while for large files)"):
                     try:
@@ -286,24 +283,38 @@ def main():
             
             st.write(f"Available timestamp range: {min_timestamp} to {max_timestamp}")
             
-            user_num = st.number_input("Enter user number", min_value=1, step=1, value=1)
+            # Optional settings with checkboxes
+            st.subheader("Processing Options")
             
-            # Create a form for all timestamp inputs to prevent reruns
-            with st.form("timestamp_form"):
-                st.subheader("Timestamp Range")
+            # User number option
+            use_custom_user_num = st.checkbox("Specify user number", value=False)
+            user_num = 1  # Default
+            if use_custom_user_num:
+                user_num = st.number_input("Enter user number", min_value=1, step=1, value=1)
+            
+            # Timestamp range option
+            use_custom_timerange = st.checkbox("Specify custom timestamp range", value=False)
+            start_timestamp = str(min_timestamp).split('.')[0] if min_timestamp != "N/A" else ""
+            end_timestamp = str(max_timestamp).split('.')[0] if max_timestamp != "N/A" else ""
+            
+            if use_custom_timerange:
                 col1, col2 = st.columns(2)
                 with col1:
                     start_timestamp = st.text_input(
                         "Enter start timestamp (YYYY-MM-DD HH:MM:SS)", 
-                        value=str(min_timestamp).split('.')[0] if min_timestamp != "N/A" else ""
+                        value=start_timestamp
                     )
                 with col2:
                     end_timestamp = st.text_input(
                         "Enter end timestamp (YYYY-MM-DD HH:MM:SS)", 
-                        value=str(max_timestamp).split('.')[0] if max_timestamp != "N/A" else ""
+                        value=end_timestamp
                     )
-                
-                st.subheader("Define Sections")
+            
+            # Section definition option
+            define_sections = st.checkbox("Define data sections", value=False)
+            section_timestamps = []
+            
+            if define_sections:
                 st.write("Define the sections in your data based on timestamps.")
                 
                 num_sections = st.number_input("Number of sections", min_value=1, step=1, value=4)
@@ -328,23 +339,23 @@ def main():
                         section_end = st.text_input(" ", key=f"section_{i}_end")
                         section_ends.append(section_end)
                 
-                # Submit button for processing
-                submit_button = st.form_submit_button("Process Data")
+                # Collect section timestamps
+                if define_sections:
+                    for i in range(num_sections):
+                        if section_starts[i] and section_ends[i]:
+                            section_timestamps.append((section_starts[i], section_ends[i]))
             
-            # Only process after form submission
-            if submit_button:
-                section_timestamps = []
-                for i in range(num_sections):
-                    if section_starts[i] and section_ends[i]:
-                        section_timestamps.append((section_starts[i], section_ends[i]))
-                
-                if len(section_timestamps) != num_sections:
+            # Process button (outside any form)
+            if st.button("Process Data"):
+                # Validation for sections if enabled
+                if define_sections and len(section_timestamps) != num_sections:
                     st.error(f"Please define all {num_sections} sections with valid timestamps.")
                 else:
                     try:
                         with st.spinner("Processing data..."):
                             processed_df = preprocess_single_user(
-                                df, user_num, start_timestamp, end_timestamp, section_timestamps
+                                df, user_num, start_timestamp, end_timestamp, 
+                                section_timestamps if define_sections else None
                             )
                         
                         st.success("Processing complete!")
@@ -371,8 +382,9 @@ def main():
                         )
                     except Exception as e:
                         st.error(f"An error occurred: {str(e)}")
-        
-    else:  # Combine Multiple Preprocessed Datasets
+    
+    # Tab 2: Combine Multiple Preprocessed Datasets
+    with tab2:
         st.header("Combine Multiple Preprocessed Datasets")
         
         st.markdown("""
@@ -382,7 +394,7 @@ def main():
         """)
         
         # Add Clear All Files button with automatic refresh
-        if st.button("Clear All Files"):
+        if st.button("Clear All Files", key="clear_multiple"):
             # Clear all session state variables
             for key in list(st.session_state.keys()):
                 if key != 'uploader_key':  # Don't delete the uploader key
@@ -414,10 +426,9 @@ def main():
                 try:
                     with st.spinner("Combining datasets..."):
                         dataframes = []
-                        # Update in the Combine Datasets button handler as well
                         for file in uploaded_files:
                             try:
-                                df = pd.read_csv(file, low_memory=False)  # Add low_memory=False
+                                df = pd.read_csv(file, low_memory=False)
                                 dataframes.append(df)
                             except Exception as e:
                                 st.error(f"Error loading {file.name}: {str(e)}")
@@ -432,7 +443,6 @@ def main():
                     # Statistics
                     st.subheader("Data Statistics")
                     st.write(f"Total rows: {combined_df.shape[0]}")
-                    # In the "Combine Multiple Preprocessed Datasets" section, update this line:
                     st.write(f"Users included: {', '.join(str(u) for u in sorted(combined_df['User'].unique()))}")
                     
                     # Download option
