@@ -247,18 +247,34 @@ def main():
         # Upload file
         uploaded_file = st.file_uploader("Upload CSV file with raw EEG data", type=["csv"], key="single_user_upload")
         
-        # Add Clear All Files button with automatic refresh
+        # Add Clear All Files button with enhanced cache clearing
         if st.button("Clear All Files", key="clear_single"):
+            # Clear all Streamlit caches
+            try:
+                # Clear all cached functions
+                st.cache_data.clear()
+                st.cache_resource.clear()
+                
+                # Try to clear deprecated caches as well (for compatibility)
+                try:
+                    st.experimental_memo.clear()
+                    st.experimental_singleton.clear()
+                except:
+                    pass
+            except Exception as e:
+                st.warning(f"Some caches couldn't be cleared: {str(e)}")
+            
             # Clear all session state variables
             for key in list(st.session_state.keys()):
-                if key != 'uploader_key':  # Don't delete the uploader key
+                if key != 'uploader_key':  # Keep the uploader key
                     del st.session_state[key]
             
             # Increment the uploader key to force a new uploader widget
             st.session_state.uploader_key += 1
-            st.success("Files cleared successfully!")
+            st.success("Files and cache cleared successfully!")
             
-            # Force Streamlit to rerun the script
+            # Force a full reload of the app
+            st.experimental_set_query_params(cleared=st.session_state.uploader_key)
             st.rerun()
         
         if uploaded_file is not None:
