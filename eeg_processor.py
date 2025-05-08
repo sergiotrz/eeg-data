@@ -1,485 +1,441 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import os
 import tempfile
-from datetime import datetime
-import io
+import datetime
+from io import StringIO
 
-# REMOVE THIS SECTION - Not needed for cloud deployment and can cause crashes
-# if not os.path.exists('.streamlit'):
-#     os.makedirs('.streamlit')
-#     with open('.streamlit/config.toml', 'w') as f:
-#         f.write('[server]\n')
-#         f.write('maxUploadSize = 5000\n')
+# Configure page and increase file size limit
+st.set_page_config(
+    page_title="EEG Data Processor",
+    page_icon="🧠",
+    initial_sidebar_state="expanded"
+)
 
-# Instead, use Streamlit's built-in server settings
-# This is done through a separate .streamlit/config.toml file in your repo
-# Or through environment variables in your cloud provider
-
-def preprocess_single_user(df, user_num, start_timestamp, end_timestamp, section_timestamps=None):
-    """
-    Preprocess data for a single user.
-    """
-    # Progress tracking
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    # Step 1: Display noise information
-    status_text.text("Step 1/9: Analyzing noise data")
-    if 'Elements' in df.columns:
-        if df['Elements'].nunique() > 0:
-            st.write(f"Blink count: {df['Elements'].value_counts().iloc[0] if len(df['Elements'].value_counts()) > 0 else 0}")
-        if df['Elements'].nunique() > 1:
-            st.write(f"Jaw clench count: {df['Elements'].value_counts().iloc[1] if len(df['Elements'].value_counts()) > 1 else 0}")
-        if df['Elements'].nunique() > 2:
-            st.write(f"Muse Connected count: {df['Elements'].value_counts().iloc[2] if len(df['Elements'].value_counts()) > 2 else 0}")
-        if df['Elements'].nunique() > 3:
-            st.write(f"Muse Disconnected count: {df['Elements'].value_counts().iloc[3] if len(df['Elements'].value_counts()) > 3 else 0}")
-        
-        total_noise = df['Elements'].value_counts().sum()
-        st.write(f"Total noise: {total_noise}")
-    
-    # Count rows with all zeros in brainwave data
-    zero_rows = df[(df['Delta_TP9'] == 0) & (df['Delta_AF7'] == 0) & 
-                   (df['Delta_AF8'] == 0) & (df['Delta_TP10'] == 0) & 
-                   (df['Theta_TP9'] == 0) & (df['Theta_AF7'] == 0) & 
-                   (df['Theta_AF8'] == 0) & (df['Theta_TP10'] == 0) & 
-                   (df['Alpha_TP9'] == 0) & (df['Alpha_AF7'] == 0) & 
-                   (df['Alpha_AF8'] == 0) & (df['Alpha_TP10'] == 0) & 
-                   (df['Beta_TP9'] == 0) & (df['Beta_AF7'] == 0) & 
-                   (df['Beta_AF8'] == 0) & (df['Beta_TP10'] == 0) & 
-                   (df['Gamma_TP9'] == 0) & (df['Gamma_AF7'] == 0) & 
-                   (df['Gamma_AF8'] == 0) & (df['Gamma_TP10'] == 0)].shape[0]
-    st.write(f"Number of rows with all zeros in brainwave data: {zero_rows}")
-    progress_bar.progress(10)
-    
-    # Step 2: Keep only rows where 'Elements' is NaN and first 25 columns
-    status_text.text("Step 2/9: Removing noise")
-    if 'Elements' in df.columns:
-        df = df[df['Elements'].isna()]
-    
-    # Keep only the first 25 columns
-    df = df.iloc[:, :25]
-    
-    # Verify that there is no NaN values in the DataFrame
-    st.write(f"NaNs in cleaned data: {df.isna().sum().sum()}")
-    progress_bar.progress(20)
-    
-    # Step 3: Remove rows with all zeros
-    status_text.text("Step 3/9: Removing zero rows")
-    df = df[~((df['Delta_TP9'] == 0) & (df['Delta_AF7'] == 0) & 
-              (df['Delta_AF8'] == 0) & (df['Delta_TP10'] == 0) & 
-              (df['Theta_TP9'] == 0) & (df['Theta_AF7'] == 0) & 
-              (df['Theta_AF8'] == 0) & (df['Theta_TP10'] == 0) & 
-              (df['Alpha_TP9'] == 0) & (df['Alpha_AF7'] == 0) & 
-              (df['Alpha_AF8'] == 0) & (df['Alpha_TP10'] == 0) & 
-              (df['Beta_TP9'] == 0) & (df['Beta_AF7'] == 0) & 
-              (df['Beta_AF8'] == 0) & (df['Beta_TP10'] == 0) & 
-              (df['Gamma_TP9'] == 0) & (df['Gamma_AF7'] == 0) & 
-              (df['Gamma_AF8'] == 0) & (df['Gamma_TP10'] == 0))]
-    progress_bar.progress(30)
-    
-    # Step 4: Add user column
-    status_text.text("Step 4/9: Adding user information")
-    if user_num < 10:
-        df.insert(0, "User", '0' + str(user_num))
-    else:
-        df.insert(0, "User", str(user_num))
-    progress_bar.progress(40)
-    
-    # Step 5: Format timestamps
-    status_text.text("Step 5/9: Formatting timestamps")
-    if 'TimeStamp' in df.columns:
-        df['TimeStamp'] = df['TimeStamp'].str[:-4] if df['TimeStamp'].iloc[0].find('.') != -1 else df['TimeStamp']
-    progress_bar.progress(50)
-    
-    # Step 6: Filter by timestamp range
-    status_text.text("Step 6/9: Filtering by timestamp range")
-    df = df[(df['TimeStamp'] >= start_timestamp) & (df['TimeStamp'] <= end_timestamp)]
-    progress_bar.progress(60)
-    
-    # Step 7: Add Time column
-    status_text.text("Step 7/9: Adding Time column")
-    df.insert(2, "Time", (pd.to_datetime(df['TimeStamp']) - 
-                         pd.to_datetime(df['TimeStamp'].iloc[0]) + 
-                         pd.to_datetime('0:00:01')).dt.strftime('%H:%M:%S.%f').str[:-3])
-    progress_bar.progress(70)
-    
-    # Step 8: Resample to one row per second
-    status_text.text("Step 8/9: Resampling data")
-    
-    # Create a copy
-    df_copy = df.copy()
-    
-    # Convert Time to datetime and set as index
-    df_copy['Time'] = pd.to_datetime(df_copy['Time'], format='%H:%M:%S.%f')
-    df_copy.set_index('Time', inplace=True)
-    
-    # Separate numeric and non-numeric columns
-    numeric_df = df_copy.select_dtypes(include=['float64', 'int64'])
-    numeric_df = numeric_df.resample('s').mean()
-    numeric_df.reset_index(inplace=True)
-    
-    non_numeric_df = df_copy.select_dtypes(exclude=['float64', 'int64'])
-    non_numeric_df = non_numeric_df.resample('s').first()
-    non_numeric_df.reset_index(inplace=True)
-    
-    # Merge DataFrames
-    df_final = pd.merge(non_numeric_df, numeric_df, on='Time')
-    df_final['Time'] = df_final['Time'].dt.time
-    
-    # Organize columns
-    df_final = df_final[['User', 'TimeStamp', 'Time'] + 
-                      [col for col in df_final.columns if col not in ['User', 'TimeStamp', 'Time']]]
-    progress_bar.progress(80)
-    
-    # Step 9: Add Section column
-    status_text.text("Step 9/9: Adding Section column")
-    
-    # Add Section column based on timestamps if section_timestamps is provided
-    if section_timestamps:
-        for i, (section_start, section_end) in enumerate(section_timestamps):
-            df_final.loc[(df_final['TimeStamp'] >= section_start) & 
-                       (df_final['TimeStamp'] <= section_end), 'Section'] = i
-        
-        # Reorder columns
-        cols = df_final.columns.tolist()
-        if 'Section' in cols:
-            cols.remove('Section')
-            cols.insert(3, 'Section')
-            df_final = df_final[cols]
-    
-    # Remove NaNs
-    df_final = df_final.dropna()
-    progress_bar.progress(100)
-    
-    status_text.text("Processing complete!")
-    
-    return df_final
-
-def combine_multiple_users(dataframes):
-    """
-    Combine data from multiple users.
-    """
-    # Progress indicator
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    status_text.text("Step 1/4: Combining dataframes")
-    df_final = pd.concat(dataframes, ignore_index=True)
-    progress_bar.progress(25)
-    
-    status_text.text("Step 2/4: Sorting data")
-    df_final.sort_values(['User', 'TimeStamp', 'Time'], inplace=True)
-    df_final.reset_index(drop=True, inplace=True)
-    progress_bar.progress(50)
-    
-    status_text.text("Step 3/4: Checking for -inf values")
-    # Remove -inf values
-    inf_count = df_final.isin([-np.inf]).sum().sum()
-    st.write(f"Number of -inf values: {inf_count}")
-    if inf_count > 0:
-        df_final = df_final[~df_final.isin([-np.inf]).any(axis=1)]
-    progress_bar.progress(75)
-    
-    status_text.text("Step 4/4: Checking for NaN values")
-    # Verify no NaNs
-    nan_count = df_final.isna().sum().sum()
-    st.write(f"Number of NaN values: {nan_count}")
-    if nan_count > 0:
-        df_final = df_final.dropna()
-    progress_bar.progress(100)
-    
-    status_text.text("Processing complete!")
-    
-    return df_final
+# Increase file size limit (this is applied through .streamlit/config.toml)
+# The actual file will need to be created separately
 
 def main():
-    st.set_page_config(
-        page_title="EEG Data Processor",
-        page_icon="🧠",
-    )
-    
     st.title("EEG Data Processor")
     
-    # Add author attribution
+    # Welcome message
     st.markdown("""
-    *Created by [Sergio Noé Torres-Rodríguez](https://github.com/sergiotrz)*
+    ## Welcome to the EEG Data Processor!
     
-    ---
-    """)
-
-    # Initialize session state for storing dataframe
-    if 'df' not in st.session_state:
-        st.session_state.df = None
-        
-    # Add a session state variable to track the uploader key
-    if 'uploader_key' not in st.session_state:
-        st.session_state.uploader_key = 0
-        
-    st.markdown("""
-    ## Welcome to the EEG Data Processor
+    This application processes EEG data collected with Muse headbands through Mind Monitor. The app can:
     
-    This application helps you process EEG data from Mind Monitor. You can:
+    - **Clean and preprocess** a single user's EEG data by removing noise, resampling data to 1-second intervals, and adding session markers
+    - **Combine multiple preprocessed datasets** into one comprehensive dataset for group analysis
     
-    1. **Preprocess a single user's data**: Clean, format and organize data for one participant
-    2. **Combine multiple preprocessed datasets**: Merge several already cleaned datasets into one consolidated file
-    
-    The preprocessing steps include:
-    - Removing noise entries (blinks, jaw clenches, etc.)
-    - Removing rows with all zeros in brainwave data
-    - Formatting timestamps and adding a Time column
-    - Resampling data to one row per second
-    - Adding section markers based on timestamps
-    
-    Select a tab below to begin.
+    Choose an option from the tabs below to get started.
     """)
     
-    # Create tabs instead of radio button
-    tab1, tab2 = st.tabs(["Preprocess Single User Data", "Combine Multiple Preprocessed Datasets"])
+    # Create tabs
+    tab1, tab2 = st.tabs(["Single User Processing", "Combine Multiple Users"])
     
-    # Tab 1: Preprocess Single User Data
+    # Tab 1: Single User Processing
     with tab1:
-        st.header("Preprocess Single User Data")
-        
-        # Upload file
-        uploaded_file = st.file_uploader("Upload CSV file with raw EEG data", type=["csv"], key="single_user_upload")
-        
-        # Add Clear All Files button with enhanced file clearing
-        if st.button("Clear All Files", key="clear_single"):
-            # Clear all Streamlit caches
-            try:
-                # Clear all cached functions
-                st.cache_data.clear()
-                st.cache_resource.clear()
-                
-                # Try to clear deprecated caches as well (for compatibility)
-                try:
-                    st.experimental_memo.clear()
-                    st.experimental_singleton.clear()
-                except:
-                    pass
-            except Exception as e:
-                st.warning(f"Some caches couldn't be cleared: {str(e)}")
-            
-            # Clear all session state variables
-            for key in list(st.session_state.keys()):
-                if key != 'uploader_key':  # Keep the uploader key
-                    del st.session_state[key]
-            
-            # Specifically clear file-related session state
-            if 'single_user_upload' in st.session_state:
-                del st.session_state['single_user_upload']
-            
-            # Reset dataframe in session state to force new file load
-            st.session_state.df = None
-            
-            # Increment the uploader key to force a completely new uploader widget
-            st.session_state.uploader_key += 1
-            
-            st.success("All files have been removed and cache cleared!")
-            
-            # Force a full reload of the app
-            st.experimental_set_query_params(cleared=st.session_state.uploader_key)
-            st.rerun()
-        
-        if uploaded_file is not None:
-            # Only read the data once and store in session_state
-            if st.session_state.df is None:
-                with st.spinner("Loading data... (this may take a while for large files)"):
-                    try:
-                        # Add low_memory=False to handle mixed data types
-                        st.session_state.df = pd.read_csv(uploaded_file, low_memory=False)
-                    except Exception as e:
-                        st.error(f"Error loading file: {str(e)}")
-                        st.stop()  # Stop execution if file loading fails
-            df = st.session_state.df
-            
-            # Show sample of raw data
-            st.subheader("Sample of Raw Data")
-            st.dataframe(df.head())
-            
-            # Get timestamp range from data for reference
-            min_timestamp = df['TimeStamp'].min() if 'TimeStamp' in df.columns else "N/A"
-            max_timestamp = df['TimeStamp'].max() if 'TimeStamp' in df.columns else "N/A"
-            
-            st.write(f"Available timestamp range: {min_timestamp} to {max_timestamp}")
-            
-            # Optional settings with checkboxes
-            st.subheader("Processing Options")
-            
-            # User number option
-            use_custom_user_num = st.checkbox("Specify user number", value=False)
-            user_num = 1  # Default
-            if use_custom_user_num:
-                user_num = st.number_input("Enter user number", min_value=1, step=1, value=1)
-            
-            # Timestamp range option
-            use_custom_timerange = st.checkbox("Specify custom timestamp range", value=False)
-            start_timestamp = str(min_timestamp).split('.')[0] if min_timestamp != "N/A" else ""
-            end_timestamp = str(max_timestamp).split('.')[0] if max_timestamp != "N/A" else ""
-            
-            if use_custom_timerange:
-                col1, col2 = st.columns(2)
-                with col1:
-                    start_timestamp = st.text_input(
-                        "Enter start timestamp (YYYY-MM-DD HH:MM:SS)", 
-                        value=start_timestamp
-                    )
-                with col2:
-                    end_timestamp = st.text_input(
-                        "Enter end timestamp (YYYY-MM-DD HH:MM:SS)", 
-                        value=end_timestamp
-                    )
-            
-            # Section definition option
-            define_sections = st.checkbox("Define data sections", value=False)
-            section_timestamps = []
-            
-            if define_sections:
-                st.write("Define the sections in your data based on timestamps.")
-                
-                num_sections = st.number_input("Number of sections", min_value=1, step=1, value=4)
-                
-                # Create organized grid for section timestamps
-                st.write("Section timestamp ranges:")
-                
-                section_starts = []
-                section_ends = []
-                
-                # Use columns for better organization
-                cols = st.columns(2)
-                cols[0].write("**Section Start**")
-                cols[1].write("**Section End**")
-                
-                for i in range(num_sections):
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        section_start = st.text_input(f"Section {i}", key=f"section_{i}_start")
-                        section_starts.append(section_start)
-                    with col2:
-                        section_end = st.text_input(" ", key=f"section_{i}_end")
-                        section_ends.append(section_end)
-                
-                # Collect section timestamps
-                if define_sections:
-                    for i in range(num_sections):
-                        if section_starts[i] and section_ends[i]:
-                            section_timestamps.append((section_starts[i], section_ends[i]))
-            
-            # Process button (outside any form)
-            if st.button("Process Data"):
-                # Validation for sections if enabled
-                if define_sections and len(section_timestamps) != num_sections:
-                    st.error(f"Please define all {num_sections} sections with valid timestamps.")
-                else:
-                    try:
-                        with st.spinner("Processing data..."):
-                            processed_df = preprocess_single_user(
-                                df, user_num, start_timestamp, end_timestamp, 
-                                section_timestamps if define_sections else None
-                            )
-                        
-                        st.success("Processing complete!")
-                        
-                        st.subheader("Processed Data")
-                        st.dataframe(processed_df)
-                        
-                        # Statistics
-                        st.subheader("Data Statistics")
-                        st.dataframe(processed_df.describe())
-                        
-                        # Check for NaNs
-                        nan_count = processed_df.isna().sum().sum()
-                        st.write(f"NaN values in processed data: {nan_count}")
-                        
-                        # Download option
-                        output_filename = st.text_input("Enter filename for download", value=f"user_{user_num}_processed.csv")
-                        csv = processed_df.to_csv(index=False)
-                        st.download_button(
-                            label="Download Processed Data as CSV",
-                            data=csv,
-                            file_name=output_filename,
-                            mime="text/csv"
-                        )
-                    except Exception as e:
-                        st.error(f"An error occurred: {str(e)}")
+        process_single_user()
     
-    # Tab 2: Combine Multiple Preprocessed Datasets
+    # Tab 2: Combine Multiple Users
     with tab2:
-        st.header("Combine Multiple Preprocessed Datasets")
-        
-        st.markdown("""
-        This option will combine multiple preprocessed datasets into a single file.
-        
-        Upload all preprocessed CSV files (the ones with "_cleaned.csv" suffix) to combine them into one dataset.
-        """)
-        
-        # Add Clear All Files button with automatic refresh
-        if st.button("Clear All Files", key="clear_multiple"):
-            # Clear all session state variables
-            for key in list(st.session_state.keys()):
-                if key != 'uploader_key':  # Don't delete the uploader key
-                    del st.session_state[key]
-            
-            # Increment the uploader key to force a new uploader widget
-            st.session_state.uploader_key += 1
-            st.success("Files cleared successfully!")
-            
-            # Force Streamlit to rerun the script
-            st.rerun()
-        
-        # Upload multiple files with dynamic key
-        uploaded_files = st.file_uploader(
-            "Upload processed CSV files", 
-            type=["csv"], 
-            accept_multiple_files=True,
-            key=f"file_uploader_{st.session_state.uploader_key}"  # Dynamic key changes when cleared
-        )
+        combine_multiple_users()
 
-        if uploaded_files:
-            st.write(f"Uploaded {len(uploaded_files)} files")
+@st.cache_resource
+def get_chunk_iterator(file_path, chunksize=10000):
+    """Get a chunk iterator for large CSV files"""
+    return pd.read_csv(file_path, chunksize=chunksize, low_memory=False)
+
+def process_single_user():
+    st.header("Single User Data Processing")
+    
+    # User number input
+    user_num = st.number_input("User Number", min_value=1, max_value=99, value=1)
+
+    # Add Clear All button
+    if st.button("Clear All", key="clear_all"):
+        st.session_state.clear()
+        st.rerun()
+    
+    # File upload
+    st.write("Upload your raw EEG CSV file from Mind Monitor (files can be very large, please be patient)")
+    uploaded_file = st.file_uploader(
+        "Choose a CSV file", 
+        type="csv", 
+        accept_multiple_files=False,
+        help="Upload the raw EEG data CSV file from Mind Monitor"
+    )
+    
+    if uploaded_file is not None:
+        # Display file info
+        file_details = {"Filename": uploaded_file.name, 
+                       "FileType": uploaded_file.type, 
+                       "FileSize": f"{uploaded_file.size / (1024 * 1024):.2f} MB"}
+        st.write(file_details)
+        
+        try:
+            # Create a temporary file to store the uploaded data
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp_file:
+                tmp_file.write(uploaded_file.getvalue())
+                tmp_path = tmp_file.name
             
-            # Show file names
-            for file in uploaded_files:
-                st.write(f"- {file.name}")
-            
-            if st.button("Combine Datasets"):
+            # Process the data in chunks to handle large files
+            with st.spinner("Reading file preview (this may take a moment for large files)..."):
+                # Read the first few rows for preview
+                df_full = pd.read_csv(tmp_path)
+                head_df = df_full.head(5)
+                tail_df = df_full.tail(5)
+                ellipsis_row = {col: "..." for col in df_full.columns}
+                ellipsis_df = pd.DataFrame([ellipsis_row])
+                df_preview = pd.concat([head_df, ellipsis_df, tail_df], ignore_index=True)
+                st.write("Preview of the uploaded data:")
+                st.write(df_preview)
+                
+                # Extract timestamp range from file
                 try:
-                    with st.spinner("Combining datasets..."):
-                        dataframes = []
-                        for file in uploaded_files:
-                            try:
-                                df = pd.read_csv(file, low_memory=False)
-                                dataframes.append(df)
-                            except Exception as e:
-                                st.error(f"Error loading {file.name}: {str(e)}")
-                                continue  # Skip problematic files
-                        combined_df = combine_multiple_users(dataframes)
+                    # Read first chunk to get min timestamp
+                    first_chunk = next(get_chunk_iterator(tmp_path, chunksize=10000))
+                    min_timestamp = first_chunk["TimeStamp"].iloc[0] if "TimeStamp" in first_chunk.columns else ""
                     
-                    st.success("Combination complete!")
+                    # Read last chunk to get max timestamp (this is an approximation)
+                    for last_chunk in get_chunk_iterator(tmp_path, chunksize=10000):
+                        pass
+                    max_timestamp = last_chunk["TimeStamp"].iloc[-1] if "TimeStamp" in last_chunk.columns else ""
                     
-                    st.subheader("Combined Data")
-                    st.dataframe(combined_df.head(50))
+                    # Remove milliseconds if present
+                    min_timestamp = min_timestamp[:19] if isinstance(min_timestamp, str) else ""
+                    max_timestamp = max_timestamp[:19] if isinstance(max_timestamp, str) else ""
+                except Exception as e:
+                    st.warning(f"Couldn't automatically detect timestamp range: {e}")
+                    min_timestamp = ""
+                    max_timestamp = ""
+            
+            # Timestamp range inputs
+            st.subheader("Timestamp Range")
+            if min_timestamp and max_timestamp:
+                st.write(f"Detected timestamp range: {min_timestamp} to {max_timestamp}")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                start_timestamp = st.text_input("Start timestamp (YYYY-MM-DD HH:MM:SS)", value=min_timestamp)
+            with col2:
+                end_timestamp = st.text_input("End timestamp (YYYY-MM-DD HH:MM:SS)", value=max_timestamp)
+            
+            # Option to define sections
+            define_sections = st.checkbox("Define experiment sections", value=False)
+            
+            # Section definition (only shown if checkbox is checked)
+            section_data = []
+            if define_sections:
+                st.subheader("Define Sections")
+                st.write("Define the different phases/sections of your experiment with their timestamp ranges:")
+                num_sections = st.number_input("Number of sections", min_value=1, max_value=10, value=3)
+
+                # Create inputs for each section using real timestamp values from the uploaded file
+                for i in range(int(num_sections)):
+                    st.markdown(f"**Section {i+1}**")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        section_label = st.text_input(f"Label for Section {i+1}", value=f"{i+1}", key=f"label_{i}")
+                    with col2:
+                        # Default start timestamp from the loaded file's min timestamp
+                        section_start = st.text_input(
+                            f"Start time (YYYY-MM-DD HH:MM:SS)",
+                            value=start_timestamp,
+                            key=f"start_{i}"
+                        )
+                    with col3:
+                        # Default end timestamp from the loaded file's max timestamp
+                        section_end = st.text_input(
+                            f"End time (YYYY-MM-DD HH:MM:SS)",
+                            value=end_timestamp,
+                            key=f"end_{i}"
+                        )
                     
-                    # Statistics
-                    st.subheader("Data Statistics")
-                    st.write(f"Total rows: {combined_df.shape[0]}")
-                    st.write(f"Users included: {', '.join(str(u) for u in sorted(combined_df['User'].unique()))}")
+                    section_data.append({
+                        "label": section_label,
+                        "start": section_start,
+                        "end": section_end
+                    })
+            
+            # Process button
+            if st.button("Process Data"):
+                with st.spinner('Processing data... This may take several minutes for large files'):
+                    progress_bar = st.progress(0)
                     
-                    # Download option
-                    output_filename = st.text_input("Enter filename for download", value="combined_eeg_dataset.csv")
-                    csv = combined_df.to_csv(index=False)
+                    # Process the file in chunks
+                    result_df = process_eeg_data_in_chunks(
+                        tmp_path, 
+                        user_num,
+                        start_timestamp, 
+                        end_timestamp, 
+                        section_data,
+                        include_sections=define_sections,
+                        progress_callback=lambda x: progress_bar.progress(x)
+                    )
+                    
+                    # Display result
+                    st.success('Processing complete!')
+                    st.subheader("Processed Data Preview")
+                    head_df = result_df.head(10)
+                    tail_df = result_df.tail(10)
+                    ellipsis_row = {col: "..." for col in result_df.columns}
+                    ellipsis_df = pd.DataFrame([ellipsis_row])
+                    preview_df = pd.concat([head_df, ellipsis_df, tail_df], ignore_index=True)
+                    st.write(preview_df)
+                    
+                    # Display summary statistics
+                    st.subheader("Data Summary")
+                    st.write(f"Total rows: {len(result_df)}")
+                    st.write(f"Time range: {result_df['Time'].iloc[0]} to {result_df['Time'].iloc[-1]}")
+                    
+                    # Only display section info if sections were defined
+                    if define_sections:
+                        st.write(f"Sections: {result_df['Section'].nunique()}")
+        
+                    output_filename = f"user_{user_num}_processed.csv"
+                    
+                    csv = result_df.to_csv(index=False)
                     st.download_button(
-                        label="Download Combined Data as CSV",
+                        label="Download Processed Data",
                         data=csv,
                         file_name=output_filename,
                         mime="text/csv"
                     )
-                except Exception as e:
-                    st.error(f"An error occurred: {str(e)}")
+                
+                # Clean up the temporary file
+                os.unlink(tmp_path)
+            
+        except Exception as e:
+            st.error(f"An error occurred: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+
+def combine_multiple_users():
+    st.header("Combine Multiple Preprocessed Datasets")
+    
+    st.write("""
+    Upload multiple preprocessed EEG CSV files (created with the Single User Processing tab) 
+    to combine them into a single dataset for group analysis.
+    """)
+
+    # Add Clear All button
+    if st.button("Clear All", key="clear_all_combined"):
+        st.session_state.clear()
+        st.rerun()
+    
+    # Multiple file upload
+    uploaded_files = st.file_uploader(
+        "Upload preprocessed EEG CSV files", 
+        type="csv", 
+        accept_multiple_files=True,
+        help="Upload the CSV files that were processed with the Single User Processing tab"
+    )
+    
+    if uploaded_files:
+        # Display file info
+        st.write(f"Uploaded {len(uploaded_files)} files:")
+        for file in uploaded_files:
+            file_details = {"Filename": file.name, 
+                           "FileSize": f"{file.size / (1024 * 1024):.2f} MB"}
+            st.write(file_details)
+        
+        # Process button
+        if st.button("Combine Data"):
+            with st.spinner('Combining data...'):
+                progress_bar = st.progress(0)
+                
+                # Combine the data
+                all_dfs = []
+                
+                for i, file in enumerate(uploaded_files):
+                    # Create a temporary file
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp_file:
+                        tmp_file.write(file.getvalue())
+                        tmp_path = tmp_file.name
+                    
+                    # Read the file
+                    df = pd.read_csv(tmp_path)
+                    all_dfs.append(df)
+                    
+                    # Clean up
+                    os.unlink(tmp_path)
+                    
+                    # Update progress
+                    progress_bar.progress((i + 1) / len(uploaded_files))
+                
+                # Concatenate all DataFrames
+                if all_dfs:
+                    df_final = pd.concat(all_dfs, ignore_index=True)
+                    
+                    # Sort by 'User', 'TimeStamp', and 'Time'
+                    df_final.sort_values(['User', 'TimeStamp', 'Time'], inplace=True)
+                    
+                    # Reset the index
+                    df_final.reset_index(drop=True, inplace=True)
+                    
+                    # Remove any -inf or inf values
+                    df_final = df_final[~df_final.isin([np.inf, -np.inf]).any(axis=1)]
+                    
+                    # Drop NaN values
+                    df_final = df_final.dropna()
+                    
+                    # Display head(10), a row with "..." and tail(10) in the same preview
+                    head_df = df_final.head(10)
+                    tail_df = df_final.tail(10)
+                    ellipsis_row = {col: "..." for col in df_final.columns}
+                    ellipsis_df = pd.DataFrame([ellipsis_row])
+                    preview_df = pd.concat([head_df, ellipsis_df, tail_df], ignore_index=True)
+                    st.success('Combining complete!')
+                    st.subheader("Combined Data Preview")
+                    st.write(preview_df)
+                    
+                    # Display unique users
+                    users = sorted(df_final['User'].unique())
+                    st.write(f"Unique Users in combined dataset: {', '.join(str(u) for u in users)}")
+                    st.write(f"Total rows: {len(df_final)}")
+                    
+                    # Allow user to download the combined file
+                    output_filename = "combined_eeg_data.csv"
+                    
+                    csv = df_final.to_csv(index=False)
+                    
+                    st.download_button(
+                        label="Download Combined Data",
+                        data=csv,
+                        file_name=output_filename,
+                        mime="text/csv"
+                    )
+                else:
+                    st.error("No valid data found in the uploaded files.")
+
+def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timestamp, section_data, include_sections=True, progress_callback=None):
+    """
+    Process EEG data in chunks to handle large files
+    """
+    # Initialize an empty list to store processed chunks
+    processed_chunks = []
+    
+    # Get the total file size for progress tracking
+    total_size = os.path.getsize(file_path)
+    processed_size = 0
+    
+    # Process the file in chunks
+    chunk_iter = get_chunk_iterator(file_path)
+    
+    for i, chunk in enumerate(chunk_iter):
+        # Update progress
+        processed_size += chunk.memory_usage(deep=True).sum()
+        if progress_callback:
+            progress_callback(min(processed_size / total_size, 0.5))  # First 50% for reading
+        
+        # Keep only the rows where 'Elements' is NaN
+        chunk = chunk[chunk['Elements'].isna()]
+        
+        # Keep only the first 25 columns if there are more
+        if chunk.shape[1] > 25:
+            chunk = chunk.iloc[:, :25]
+        
+        # Remove rows where all brainwave data values are zero
+        chunk = chunk[~((chunk['Delta_TP9'] == 0) & (chunk['Delta_AF7'] == 0) & 
+              (chunk['Delta_AF8'] == 0) & (chunk['Delta_TP10'] == 0) & 
+              (chunk['Theta_TP9'] == 0) & (chunk['Theta_AF7'] == 0) & 
+              (chunk['Theta_AF8'] == 0) & (chunk['Theta_TP10'] == 0) & 
+              (chunk['Alpha_TP9'] == 0) & (chunk['Alpha_AF7'] == 0) & 
+              (chunk['Alpha_AF8'] == 0) & (chunk['Alpha_TP10'] == 0) & 
+              (chunk['Beta_TP9'] == 0) & (chunk['Beta_AF7'] == 0) & 
+              (chunk['Beta_AF8'] == 0) & (chunk['Beta_TP10'] == 0) & 
+              (chunk['Gamma_TP9'] == 0) & (chunk['Gamma_AF7'] == 0) & 
+              (chunk['Gamma_AF8'] == 0) & (chunk['Gamma_TP10'] == 0))]
+        
+        # Add to processed chunks list if not empty
+        if not chunk.empty:
+            processed_chunks.append(chunk)
+    
+    # Concatenate all processed chunks
+    if processed_chunks:
+        df = pd.concat(processed_chunks, ignore_index=True)
+    else:
+        return pd.DataFrame()  # Return empty DataFrame if no valid data
+    
+    # Format user number
+    if user_num < 10:
+        df.insert(0, "User", '0' + str(user_num))
+    else:
+        df.insert(0, "User", str(user_num))
+    
+    # Remove the milliseconds from the 'TimeStamp' column
+    df['TimeStamp'] = df['TimeStamp'].str[:-4]
+    
+    # Filter by timestamp range
+    df = df[(df['TimeStamp'] >= start_timestamp) & (df['TimeStamp'] <= end_timestamp)]
+    
+    # Update progress
+    if progress_callback:
+        progress_callback(0.6)  # 60% complete
+    
+    # Add Time column
+    if not df.empty:
+        df.insert(2, "Time", (pd.to_datetime(df['TimeStamp']) - pd.to_datetime(df['TimeStamp'].iloc[0]) + 
+                             pd.to_datetime('0:00:01')).dt.strftime('%H:%M:%S.%f').str[:-3])
+    else:
+        return pd.DataFrame()  # Return empty DataFrame if filtered data is empty
+    
+    # Create a copy for resampling
+    df_copy = df.copy()
+    
+    # Update progress
+    if progress_callback:
+        progress_callback(0.7)  # 70% complete
+    
+    # Convert Time to datetime and set as index
+    df_copy['Time'] = pd.to_datetime(df_copy['Time'])
+    df_copy.set_index('Time', inplace=True)
+    
+    # Select numeric columns for resampling
+    numeric_df = df_copy.select_dtypes(include=['float64', 'int64'])
+    numeric_df = numeric_df.resample('s').mean()
+    numeric_df.reset_index(inplace=True)
+    
+    # Select non-numeric columns for resampling
+    non_numeric_df = df_copy.select_dtypes(exclude=['float64', 'int64'])
+    non_numeric_df = non_numeric_df.resample('s').first()
+    non_numeric_df.reset_index(inplace=True)
+    
+    # Merge the resampled DataFrames
+    df_final = pd.merge(non_numeric_df, numeric_df, on='Time')
+    df_final['Time'] = df_final['Time'].dt.time
+    
+    # Update progress
+    if progress_callback:
+        progress_callback(0.8)  # 80% complete
+    
+    # Organize columns
+    df_final = df_final[['User', 'TimeStamp', 'Time'] + 
+                       [col for col in df_final.columns if col not in ['User', 'TimeStamp', 'Time']]]
+    
+    # Add Section column based on user input (only if sections are included)
+    if include_sections and section_data:
+        df_final['Section'] = None
+        for section in section_data:
+            df_final.loc[(df_final['TimeStamp'] >= section['start']) & 
+                         (df_final['TimeStamp'] <= section['end']), 'Section'] = section['label']
+        
+        # Reorder columns to place 'Section' in the 3rd position
+        cols = df_final.columns.tolist()
+        cols.remove('Section')
+        cols.insert(3, 'Section')
+        df_final = df_final[cols]
+    
+    # Drop NaN values
+    df_final = df_final.dropna()
+    
+    # Update progress
+    if progress_callback:
+        progress_callback(1.0)  # 100% complete
+    
+    return df_final
 
 if __name__ == "__main__":
     main()

@@ -1,2 +1,17 @@
 [server]
 maxUploadSize = 5000
+enableXsrfProtection = true
+enableCORS = false
+
+[theme]
+primaryColor = "#50C878"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F0F2F6"
+textColor = "#262730"
+
+[browser]
+gatherUsageStats = false
+
+[runner]
+# Increase memory limit if your Streamlit Cloud instance allows
+magicEnabled = false  # Disable magic for better performance
