@@ -84,7 +84,9 @@ def process_single_user():
                 st.session_state.min_timestamp = ""
             if 'max_timestamp' not in st.session_state:
                 st.session_state.max_timestamp = ""
-            
+
+
+            """
             # Preview button
             if st.button("Generate File Preview"):
                 with st.spinner("Loading file preview..."):
@@ -104,6 +106,7 @@ def process_single_user():
                         st.write(df_preview)
                     except Exception as e:
                         st.error(f"Error generating preview: {e}")
+            """
             
             # Extract timestamp range with a button
             if st.button("Detect Timestamp Range"):
@@ -203,6 +206,7 @@ def process_single_user():
                         # Store processed data in session state
                         st.session_state.processed_data = result_df
                         
+                        """                        
                         # Show preview button
                         if st.button("View Processed Data Preview"):
                             st.subheader("Processed Data Preview")
@@ -212,6 +216,8 @@ def process_single_user():
                             ellipsis_df = pd.DataFrame([ellipsis_row])
                             preview_df = pd.concat([head_df, ellipsis_df, tail_df], ignore_index=True)
                             st.write(preview_df)
+                        """
+
                         
                         # Display summary statistics
                         st.subheader("Data Summary")
@@ -335,6 +341,7 @@ def combine_multiple_users():
                         
                         st.success('Combining complete!')
                         
+                        """
                         # Show preview button 
                         if st.button("View Combined Data Preview"):
                             st.subheader("Combined Data Preview")
@@ -344,6 +351,8 @@ def combine_multiple_users():
                             ellipsis_df = pd.DataFrame([ellipsis_row])
                             preview_df = pd.concat([head_df, ellipsis_df, tail_df], ignore_index=True)
                             st.write(preview_df)
+                        """
+
                         
                         # Display summary info
                         st.subheader("Dataset Summary")
