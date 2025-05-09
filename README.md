@@ -30,8 +30,8 @@ The EEG Data Processor is a Streamlit-based application designed for processing 
 
 1. Clone the repository:
    ```
-   git clone https://github.com/yourusername/eeg-data-processor.git
-   cd eeg-data-processor
+   git clone https://github.com/sergiotrz/eeg-data.git
+   cd eeg-data
    ```
 
 2. Install required packages:
