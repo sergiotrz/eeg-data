@@ -116,4 +116,4 @@ The processed files include:
 
 ## Author
 
-[Sergio Noé Torres-Rodríguez](www.linkedin.com/in/sergiotrz)
+Sergio Noé Torres-Rodríguez
