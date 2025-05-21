@@ -6,6 +6,10 @@ import tempfile
 import datetime
 from io import StringIO
 import re
+import gc
+
+
+
 
 # Configure page and increase file size limit
 st.set_page_config(
@@ -37,20 +41,8 @@ def standardize_timestamp(timestamp_str):
 def main():
     st.title("EEG Data Processor")
     
-    # Welcome message
-    st.markdown("""
-    ## Welcome to the EEG Data Processor!
-    
-    This application processes EEG data collected with Muse headbands through Mind Monitor. The app can:
-    
-    - **Clean and preprocess** a single user's EEG data by removing noise, resampling data to 1-second intervals, and adding session markers
-    - **Combine multiple preprocessed datasets** into one comprehensive dataset for group analysis
-    
-    Choose an option from the tabs below to get started.
-    """)
-    
     # Create tabs
-    tab1, tab2 = st.tabs(["Single User Processing", "Combine Multiple Users"])
+    tab1, tab2, tab3 = st.tabs(["Single User Processing", "Combine Multiple Users", "Memory Diagnostics"])
     
     # Tab 1: Single User Processing
     with tab1:
@@ -59,14 +51,39 @@ def main():
     # Tab 2: Combine Multiple Users
     with tab2:
         combine_multiple_users()
+    
+    # Tab 3: Memory diagnostics 
+    with tab3:
+        memory_diagnostics()
 
-import gc
-import tracemalloc
-import json
-import objgraph
-import streamlit as st
 
-@st.cache_resource
+
+# Modify function to get only needed columns
+@st.cache_resource(max_entries=1)  # Limit to one cached item to prevent accumulation
+def get_chunk_iterator(file_path, chunksize=50):  # Even smaller chunks
+    """Get a chunk iterator for large CSV files"""
+    # Detect columns we actually need to reduce memory usage
+    usecols = None
+    try:
+        # Read only the header to determine columns
+        header = pd.read_csv(file_path, nrows=0)
+        necessary_cols = ['TimeStamp', 'Elements']
+        # Add brain wave columns if they exist
+        for prefix in ['Delta_', 'Theta_', 'Alpha_', 'Beta_', 'Gamma_']:
+            necessary_cols.extend([col for col in header.columns if col.startswith(prefix)])
+        # Only keep columns that exist in the file
+        usecols = [col for col in necessary_cols if col in header.columns]
+    except:
+        pass
+    
+    # Use dtype optimization for common columns to reduce memory usage
+    dtypes = {'TimeStamp': 'str'}
+    
+    return pd.read_csv(file_path, chunksize=chunksize, low_memory=False, 
+                      usecols=usecols if usecols else None,
+                      dtype=dtypes)
+
+
 def init_tracking_object():
     tracemalloc.start(10)
     return {
@@ -74,6 +91,47 @@ def init_tracking_object():
         "tracebacks": {},
         "snapshot": None
     }
+
+# Memory diagnostics tab implementation
+def memory_diagnostics():
+    st.header("Memory Diagnostics")
+    
+    # Import memory tracking module
+    try:
+        from memory_tracking import compare_snapshots, find_leak_sources
+        
+        st.write("""This tab helps diagnose memory issues in the application. 
+                 Click the buttons below to run diagnostics.""")
+        
+        if st.button("Check Memory Usage"):
+            current_usage = get_current_memory_usage()
+            st.metric("Current Memory Usage", f"{current_usage:.1f} MB")
+        
+        if st.button("Detect Memory Leaks"):
+            compare_snapshots()
+        
+        if st.button("Find Leak Sources"):
+            find_leak_sources()
+            
+        if st.button("Force Garbage Collection"):
+            before = get_current_memory_usage()
+            gc.collect()
+            after = get_current_memory_usage()
+            st.write(f"Memory before GC: {before:.1f} MB")
+            st.write(f"Memory after GC: {after:.1f} MB")
+            st.write(f"Memory freed: {(before - after):.1f} MB")
+            
+    except ImportError:
+        st.error("""Memory tracking module not found. 
+                 Please create the memory_tracking.py file using the code provided.""")
+
+def get_current_memory_usage():
+    """Get current memory usage of the Python process in MB"""
+    import psutil
+    import os
+    process = psutil.Process(os.getpid())
+    return process.memory_info().rss / 1024 / 1024
+
 
 def compare_snapshots():
     """Compare memory snapshots to detect leaks"""
@@ -148,22 +206,53 @@ def find_leak_sources():
     else:
         st.write("No obvious leak sources found")
 
+# Helper function for proper resource cleanup
+def cleanup_resources():
+    """Clean up all temporary resources and free memory"""
+    # Clean up temp files
+    if 'tmp_path' in st.session_state and os.path.exists(st.session_state.tmp_path):
+        try:
+            os.unlink(st.session_state.tmp_path)
+        except Exception:
+            pass
+    
+    # Clean up any stored DataFrames
+    if 'processed_data' in st.session_state:
+        del st.session_state.processed_data
+    
+    # Clean up any temporary files in combine function
+    if 'temp_files' in st.session_state:
+        for tmp_path in st.session_state.temp_files:
+            if os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except:
+                    pass
+        del st.session_state.temp_files
+    
+    # Clear the session state
+    st.session_state.clear()
+    
+    # Force garbage collection
+    gc.collect()
 
 def process_single_user():
+    # Add data sampling option for very large files
     st.header("Single User Data Processing")
+    
+    # Add sampling options
+    col1, col2 = st.columns(2)
+    with col1:
+        enable_sampling = st.checkbox("Enable data sampling (for large files)", value=False)
+    with col2:
+        sample_rate = st.slider("Sampling rate (%)", 1, 100, 20, disabled=not enable_sampling)
     
     # User number input
     user_num = st.number_input("User Number", min_value=1, max_value=99, value=1)
 
-    # Clear All button - improved to clean temporary files
+    # Clear All button with improved cleanup
     if st.button("Clear All", key="clear_all"):
-        # Clean up temp file if it exists
-        if 'tmp_path' in st.session_state and os.path.exists(st.session_state.tmp_path):
-            try:
-                os.unlink(st.session_state.tmp_path)
-            except Exception:
-                pass
-        st.session_state.clear()
+        cleanup_resources()
         st.rerun()
     
     # File upload with memory warning
@@ -547,7 +636,9 @@ def combine_multiple_users():
 
 # ...existing code...
 
-def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timestamp, section_data, include_sections=True, progress_callback=None):
+def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timestamp, section_data, 
+                              include_sections=True, progress_callback=None, sampling_enabled=False, 
+                              sample_rate=100):    
     """
     Process EEG data in chunks to handle large files with optimized memory usage
     """
@@ -567,26 +658,38 @@ def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timesta
     # Get the total file size for progress tracking
     total_size = os.path.getsize(file_path)
     processed_size = 0
+
+    # Apply sampling logic if enabled
+    sample_every_n_rows = 100 // sample_rate if sampling_enabled else 1
+    
+    # Write processed chunks directly to disk to avoid memory issues
+    temp_output_file = tempfile.NamedTemporaryFile(delete=False, suffix='.csv')
+    temp_output_path = temp_output_file.name
+    temp_output_file.close()
+    
+    # First write the header
+    header_written = False
+    rows_processed = 0
+    total_rows = 0
     
     try:
         # Process the file in smaller chunks 
         chunk_iter = get_chunk_iterator(file_path, chunksize=100)
         
-        # First pass: Read data and filter
+        # First pass: Process and write filtered data
+        chunk_iter = get_chunk_iterator(file_path, chunksize=50)
+        
         for i, chunk in enumerate(chunk_iter):
-            # Update progress
-            processed_size += chunk.memory_usage(deep=True).sum()
-            if progress_callback:
-                progress_callback(min(processed_size / total_size * 0.4, 0.4))  # First 40% for reading
+            # Apply sampling if enabled
+            if sampling_enabled and sample_every_n_rows > 1:
+                chunk = chunk.iloc[::sample_every_n_rows]
             
-            # Only keep rows within timestamp range if timestamps exist
+            # Filter chunk by timestamp
             if 'TimeStamp' in chunk.columns:
-                # Remove milliseconds if present
                 chunk['TimeStamp'] = chunk['TimeStamp'].astype(str).str[:-4]
-                # Filter by timestamp early to reduce memory usage
                 chunk = chunk[(chunk['TimeStamp'] >= start_timestamp) & (chunk['TimeStamp'] <= end_timestamp)]
             
-            # Skip processing if chunk is empty after timestamp filtering
+            # Skip if empty after filtering
             if chunk.empty:
                 continue
                 
@@ -656,8 +759,18 @@ def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timesta
             
             final_chunks.append(df_batch)
             
+            # Write to temp file
+            if not header_written:
+                chunk.to_csv(temp_output_path, mode='w', index=False)
+                header_written = True
+            else:
+                chunk.to_csv(temp_output_path, mode='a', header=False, index=False)
+            
+            rows_processed += len(chunk)
+            total_rows = i * 50  # Estimate based on chunk number
+            
             # Free memory
-            del df_batch, batch
+            del chunk
             gc.collect()
             
             # Update progress
@@ -673,6 +786,19 @@ def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timesta
         
         if progress_callback:
             progress_callback(0.8)  # 80% complete
+        
+    # Read back the processed data
+    if rows_processed > 0:
+        # Read back in smaller chunks if file is large
+        if os.path.getsize(temp_output_path) > 100 * 1024 * 1024:  # 100MB
+            final_dfs = []
+            for chunk in pd.read_csv(temp_output_path, chunksize=1000):
+                final_dfs.append(chunk)
+            df_final = pd.concat(final_dfs)
+            del final_dfs
+            gc.collect()
+        else:
+            df_final = pd.read_csv(temp_output_path)
         
         # Organize columns
         column_order = ['User', 'TimeStamp', 'Time']
