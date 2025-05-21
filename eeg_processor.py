@@ -828,16 +828,16 @@ def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timesta
             return df_final
         else:
             return pd.DataFrame()
-            
-    except Exception as e:
-        raise e
-    finally:
-        # Always clean up the temporary file
-        if os.path.exists(temp_output_path):
-            try:
-                os.unlink(temp_output_path)
-            except:
-                pass
+
+        except Exception as e:
+            raise e
+        finally:
+            # Always clean up the temporary file
+            if os.path.exists(temp_output_path):
+                try:
+                    os.unlink(temp_output_path)
+                except:
+                    pass
 
 if __name__ == "__main__":
     main()
