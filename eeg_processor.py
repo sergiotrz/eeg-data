@@ -821,22 +821,23 @@ def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timesta
                 cols.insert(3, 'Section')
                 df_final = df_final[cols]
         
-        # Update progress
-        if progress_callback:
-            progress_callback(1.0)  # 100% complete
-        
-        return df_final
-    
-    except MemoryError:
-        # Specific handling for memory errors
-        if progress_callback:
-            progress_callback(1.0)  # Complete the progress bar
-        raise MemoryError("Out of memory while processing. Try reducing the time range or using a smaller file.")
+            # Complete progress
+            if progress_callback:
+                progress_callback(1.0)
+                
+            return df_final
+        else:
+            return pd.DataFrame()
+            
     except Exception as e:
-        # Clean up in case of error
-        if progress_callback:
-            progress_callback(1.0)  # Complete the progress bar
         raise e
+    finally:
+        # Always clean up the temporary file
+        if os.path.exists(temp_output_path):
+            try:
+                os.unlink(temp_output_path)
+            except:
+                pass
 
 if __name__ == "__main__":
     main()
