@@ -72,8 +72,14 @@ def process_single_user():
     # User number input
     user_num = st.number_input("User Number", min_value=1, max_value=99, value=1)
 
-    # Clear All button
+    # Clear All button - improved to clean temporary files
     if st.button("Clear All", key="clear_all"):
+        # Clean up temp file if it exists
+        if 'tmp_path' in st.session_state and os.path.exists(st.session_state.tmp_path):
+            try:
+                os.unlink(st.session_state.tmp_path)
+            except Exception:
+                pass
         st.session_state.clear()
         st.rerun()
     
@@ -300,8 +306,16 @@ def combine_multiple_users():
     to combine them into a single dataset for group analysis.
     """)
 
-    # Clear All button
+    # Clear All button - improved to clean temporary files
     if st.button("Clear All", key="clear_all_combined"):
+        # Clean up any temporary files that might be in session state
+        if 'temp_files' in st.session_state:
+            for tmp_path in st.session_state.temp_files:
+                if os.path.exists(tmp_path):
+                    try:
+                        os.unlink(tmp_path)
+                    except:
+                        pass
         st.session_state.clear()
         st.rerun()
     
@@ -323,6 +337,7 @@ def combine_multiple_users():
                 st.write(file_details)
         
         # Process button
+        # Process button
         if st.button("Combine Data"):
             with st.spinner('Combining data...'):
                 progress_bar = st.progress(0)
@@ -339,10 +354,10 @@ def combine_multiple_users():
                             tmp_path = tmp_file.name
                             temp_files.append(tmp_path)
                         
-                        # Read the file in chunks if it's large
+                        # Read the file in smaller chunks if it's large
                         if os.path.getsize(tmp_path) > 50 * 1024 * 1024:  # If file > 50MB
                             chunks = []
-                            for chunk in pd.read_csv(tmp_path, chunksize=10000):
+                            for chunk in pd.read_csv(tmp_path, chunksize=500):  # Smaller chunk size
                                 chunks.append(chunk)
                             df = pd.concat(chunks, ignore_index=True)
                         else:
@@ -352,6 +367,10 @@ def combine_multiple_users():
                         
                         # Update progress
                         progress_bar.progress((i + 1) / len(uploaded_files))
+                    
+                    # Store temp files in session state for later cleanup
+                    st.session_state.temp_files = temp_files
+
                     
                     # Concatenate all DataFrames
                     if all_dfs:
@@ -405,18 +424,30 @@ def combine_multiple_users():
                         )
                     else:
                         st.error("No valid data found in the uploaded files.")
-                    
-                    # Clean up temp files
+
+                    # Clean up temp files after processing
                     for tmp_path in temp_files:
                         try:
                             os.unlink(tmp_path)
                         except:
                             pass
+                    # Remove from session state
+                    if 'temp_files' in st.session_state:
+                        del st.session_state.temp_files
                             
                 except Exception as e:
                     st.error(f"An error occurred during combining: {e}")
                     import traceback
                     st.code(traceback.format_exc())
+                                    # Clean up temp files in case of error
+                    for tmp_path in temp_files:
+                        try:
+                            os.unlink(tmp_path)
+                        except:
+                            pass
+                    # Remove from session state
+                    if 'temp_files' in st.session_state:
+                        del st.session_state.temp_files
 
 # ...existing code...
 
