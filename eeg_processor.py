@@ -5,6 +5,7 @@ import os
 import tempfile
 import datetime
 from io import StringIO
+import re
 
 # Configure page and increase file size limit
 st.set_page_config(
@@ -12,6 +13,25 @@ st.set_page_config(
     page_icon="🧠",
     initial_sidebar_state="expanded"
 )
+
+def standardize_timestamp(timestamp_str):
+    """
+    Standardize timestamp format to ensure HH:MM:SS format with leading zeros
+    
+    Examples:
+    2025-05-02 9:32:30 → 2025-05-02 09:32:30
+    2025-5-2 9:32:30 → 2025-05-02 09:32:30
+    """
+    if not timestamp_str or not isinstance(timestamp_str, str):
+        return timestamp_str
+        
+    # Use regex to match timestamp components
+    match = re.match(r'(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{1,2}):(\d{1,2})', timestamp_str)
+    if match:
+        year, month, day, hour, minute, second = match.groups()
+        # Pad with leading zeros where needed
+        return f"{year}-{int(month):02d}-{int(day):02d} {int(hour):02d}:{int(minute):02d}:{int(second):02d}"
+    return timestamp_str
 
 
 def main():
@@ -40,57 +60,24 @@ def main():
     with tab2:
         combine_multiple_users()
 
-def normalize_timestamp(ts):
-    """
-    Normaliza un timestamp a formato YYYY-MM-DD HH:MM:SS
-    Si la hora, minuto o segundo tiene un solo dígito, agrega un cero.
-    """
-    import re
-    if not ts:
-        return ""
-    # Busca el patrón de fecha y hora
-    match = re.match(r"(\d{4}-\d{2}-\d{2})\s+(\d{1,2}):(\d{1,2}):(\d{1,2})", ts.strip())
-    if match:
-        date, h, m, s = match.groups()
-        return f"{date} {int(h):02d}:{int(m):02d}:{int(s):02d}"
-    return ts  # Si no hace match, regresa el original
-
 @st.cache_resource
-def get_chunk_iterator(file_path, chunksize=1000):  # Chunk size más pequeño
+def get_chunk_iterator(file_path, chunksize=500):  # Reduced from 5000 to 500
     """Get a chunk iterator for large CSV files"""
     return pd.read_csv(file_path, chunksize=chunksize, low_memory=False)
-
-def detect_min_max_timestamp(file_path):
-    """
-    Detecta el timestamp mínimo y máximo del archivo de entrada.
-    """
-    min_ts, max_ts = "", ""
-    try:
-        # Lee el primer chunk para el mínimo
-        for chunk in pd.read_csv(file_path, chunksize=1000):
-            if "TimeStamp" in chunk.columns:
-                min_ts = chunk["TimeStamp"].iloc[0]
-                break
-        # Lee el último chunk para el máximo
-        for chunk in pd.read_csv(file_path, chunksize=1000):
-            pass
-        if "TimeStamp" in chunk.columns:
-            max_ts = chunk["TimeStamp"].iloc[-1]
-        # Quita milisegundos si existen
-        min_ts = min_ts[:19] if isinstance(min_ts, str) else ""
-        max_ts = max_ts[:19] if isinstance(max_ts, str) else ""
-    except Exception:
-        pass
-    return min_ts, max_ts
+# ...existing code...
 
 def process_single_user():
     st.header("Single User Data Processing")
+    
+    # User number input
     user_num = st.number_input("User Number", min_value=1, max_value=99, value=1)
 
+    # Clear All button
     if st.button("Clear All", key="clear_all"):
         st.session_state.clear()
         st.rerun()
-
+    
+    # File upload
     st.write("Upload your raw EEG CSV file from Mind Monitor (files can be very large, please be patient)")
     uploaded_file = st.file_uploader(
         "Choose a CSV file", 
@@ -98,81 +85,140 @@ def process_single_user():
         accept_multiple_files=False,
         help="Upload the raw EEG data CSV file from Mind Monitor"
     )
-
+    
     if uploaded_file is not None:
+        # Display file info
         file_details = {"Filename": uploaded_file.name, 
                        "FileType": uploaded_file.type, 
                        "FileSize": f"{uploaded_file.size / (1024 * 1024):.2f} MB"}
         st.write(file_details)
+        
         try:
+            # Create a temporary file to store the uploaded data - do this only once
             if 'tmp_path' not in st.session_state:
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp_file:
                     tmp_file.write(uploaded_file.getvalue())
                     st.session_state.tmp_path = tmp_file.name
-
-            # Detecta automáticamente los timestamps si no están en session_state
-            if 'min_timestamp' not in st.session_state or 'max_timestamp' not in st.session_state:
-                min_ts, max_ts = detect_min_max_timestamp(st.session_state.tmp_path)
-                st.session_state.min_timestamp = min_ts
-                st.session_state.max_timestamp = max_ts
-
-            # Timestamp range inputs con normalización automática
+                    
+                # Automatically detect timestamp range when file is uploaded
+                with st.spinner("Detecting timestamp range (this may take a moment)..."):
+                    try:
+                        # Read first chunk to get min timestamp
+                        first_chunk = next(get_chunk_iterator(st.session_state.tmp_path, chunksize=500))
+                        min_timestamp = first_chunk["TimeStamp"].iloc[0] if "TimeStamp" in first_chunk.columns else ""
+                        
+                        # Read chunks incrementally to find the last one (more efficient)
+                        max_timestamp = min_timestamp
+                        chunk_count = 0
+                        total_chunks = (os.path.getsize(st.session_state.tmp_path) // (500 * 100)) + 1  # Estimate
+                        
+                        # Create a progress bar for timestamp detection
+                        timestamp_progress = st.progress(0)
+                        
+                        for i, chunk in enumerate(get_chunk_iterator(st.session_state.tmp_path, chunksize=500)):
+                            chunk_count += 1
+                            if "TimeStamp" in chunk.columns and not chunk["TimeStamp"].empty:
+                                chunk_max = chunk["TimeStamp"].iloc[-1]
+                                if chunk_max > max_timestamp:
+                                    max_timestamp = chunk_max
+                            
+                            # Update progress every 10 chunks
+                            if i % 10 == 0:
+                                timestamp_progress.progress(min(i / total_chunks, 1.0))
+                        
+                        # Remove milliseconds if present
+                        min_timestamp = min_timestamp[:19] if isinstance(min_timestamp, str) else ""
+                        max_timestamp = max_timestamp[:19] if isinstance(max_timestamp, str) else ""
+                        
+                        # Standardize timestamps
+                        min_timestamp = standardize_timestamp(min_timestamp)
+                        max_timestamp = standardize_timestamp(max_timestamp)
+                        
+                        # Store in session state
+                        st.session_state.min_timestamp = min_timestamp
+                        st.session_state.max_timestamp = max_timestamp
+                        
+                        # Clear progress bar
+                        timestamp_progress.empty()
+                        
+                        st.success("Timestamp range detected!")
+                    except Exception as e:
+                        st.warning(f"Couldn't detect timestamp range: {e}")
+            
+            # Initialize timestamp variables if not in session state
+            if 'min_timestamp' not in st.session_state:
+                st.session_state.min_timestamp = ""
+            if 'max_timestamp' not in st.session_state:
+                st.session_state.max_timestamp = ""
+                
+            # Timestamp range inputs with standardized format
             st.subheader("Timestamp Range")
             if st.session_state.min_timestamp and st.session_state.max_timestamp:
                 st.write(f"Detected timestamp range: {st.session_state.min_timestamp} to {st.session_state.max_timestamp}")
-
+            
             col1, col2 = st.columns(2)
             with col1:
-                start_timestamp = st.text_input(
-                    "Start timestamp (YYYY-MM-DD HH:MM:SS)",
-                    value=st.session_state.min_timestamp,
-                    key="start_ts"
-                )
+                start_timestamp_input = st.text_input("Start timestamp (YYYY-MM-DD HH:MM:SS)", value=st.session_state.min_timestamp)
+                # Standardize timestamp format when user inputs it
+                start_timestamp = standardize_timestamp(start_timestamp_input)
+                if start_timestamp != start_timestamp_input and start_timestamp_input:
+                    st.info(f"Timestamp standardized to: {start_timestamp}")
             with col2:
-                end_timestamp = st.text_input(
-                    "End timestamp (YYYY-MM-DD HH:MM:SS)",
-                    value=st.session_state.max_timestamp,
-                    key="end_ts"
-                )
-
-            # Normaliza los timestamps automáticamente
-            start_timestamp = normalize_timestamp(start_timestamp)
-            end_timestamp = normalize_timestamp(end_timestamp)
-
+                end_timestamp_input = st.text_input("End timestamp (YYYY-MM-DD HH:MM:SS)", value=st.session_state.max_timestamp)
+                # Standardize timestamp format when user inputs it
+                end_timestamp = standardize_timestamp(end_timestamp_input)
+                if end_timestamp != end_timestamp_input and end_timestamp_input:
+                    st.info(f"Timestamp standardized to: {end_timestamp}")
+            
+            # Option to define sections
             define_sections = st.checkbox("Define experiment sections", value=False)
+            
+            # Section definition (only shown if checkbox is checked)
+# ...existing code...
+
+            # Section definition (only shown if checkbox is checked)
             section_data = []
             if define_sections:
                 st.subheader("Define Sections")
                 st.write("Define the different phases/sections of your experiment with their timestamp ranges:")
                 num_sections = st.number_input("Number of sections", min_value=1, max_value=10, value=3)
+
+                # Create inputs for each section using timestamp values
                 for i in range(int(num_sections)):
                     st.markdown(f"**Section {i+1}**")
                     col1, col2, col3 = st.columns(3)
                     with col1:
                         section_label = st.text_input(f"Label for Section {i+1}", value=f"{i+1}", key=f"label_{i}")
                     with col2:
-                        section_start = st.text_input(
+                        section_start_input = st.text_input(
                             f"Start time (YYYY-MM-DD HH:MM:SS)",
                             value=start_timestamp,
                             key=f"start_{i}"
                         )
+                        # Standardize section start timestamp
+                        section_start = standardize_timestamp(section_start_input)
                     with col3:
-                        section_end = st.text_input(
+                        section_end_input = st.text_input(
                             f"End time (YYYY-MM-DD HH:MM:SS)",
                             value=end_timestamp,
                             key=f"end_{i}"
                         )
-                    # Normaliza los timestamps de sección
+                        # Standardize section end timestamp
+                        section_end = standardize_timestamp(section_end_input)
+                    
                     section_data.append({
                         "label": section_label,
-                        "start": normalize_timestamp(section_start),
-                        "end": normalize_timestamp(section_end)
+                        "start": section_start,
+                        "end": section_end
                     })
-
+            
+            # Process button
             if st.button("Process Data"):
                 with st.spinner('Processing data... This may take several minutes for large files'):
                     progress_bar = st.progress(0)
+                    
                     try:
+                        # Process the file in chunks
                         result_df = process_eeg_data_in_chunks(
                             st.session_state.tmp_path, 
                             user_num,
@@ -182,17 +228,42 @@ def process_single_user():
                             include_sections=define_sections,
                             progress_callback=lambda x: progress_bar.progress(x)
                         )
+                        
                         if result_df.empty:
                             st.error("No valid data found after processing. Check your timestamp range and filters.")
                             return
+                        
+                        # Display result
                         st.success('Processing complete!')
+                        
+                        # Store processed data in session state
                         st.session_state.processed_data = result_df
+                        
+                        """                        
+                        # Show preview button
+                        if st.button("View Processed Data Preview"):
+                            st.subheader("Processed Data Preview")
+                            head_df = result_df.head(5)
+                            tail_df = result_df.tail(5)
+                            ellipsis_row = {col: "..." for col in result_df.columns}
+                            ellipsis_df = pd.DataFrame([ellipsis_row])
+                            preview_df = pd.concat([head_df, ellipsis_df, tail_df], ignore_index=True)
+                            st.write(preview_df)
+                        """
+
+                        
+                        # Display summary statistics
                         st.subheader("Data Summary")
                         st.write(f"Total rows: {len(result_df)}")
                         st.write(f"Time range: {result_df['Time'].iloc[0]} to {result_df['Time'].iloc[-1]}")
+                        
+                        # Only display section info if sections were defined
                         if define_sections:
                             st.write(f"Sections: {result_df['Section'].nunique()}")
+                
                         output_filename = f"user_{user_num}_processed.csv"
+                        
+                        # Allow user to download the processed file
                         csv = result_df.to_csv(index=False)
                         st.download_button(
                             label="Download Processed Data",
@@ -200,23 +271,26 @@ def process_single_user():
                             file_name=output_filename,
                             mime="text/csv"
                         )
+                    
                     except MemoryError:
                         st.error("Out of memory. Try processing a smaller file or reduce the time range.")
                     except Exception as e:
                         st.error(f"An error occurred during processing: {e}")
                         import traceback
                         st.code(traceback.format_exc())
+            
         except Exception as e:
             st.error(f"An error occurred: {e}")
             import traceback
             st.code(traceback.format_exc())
+            
+            # Clean up temp file in case of error
             if 'tmp_path' in st.session_state and os.path.exists(st.session_state.tmp_path):
                 try:
                     os.unlink(st.session_state.tmp_path)
                     del st.session_state.tmp_path
                 except:
                     pass
-
 
 def combine_multiple_users():
     st.header("Combine Multiple Preprocessed Datasets")
@@ -344,10 +418,22 @@ def combine_multiple_users():
                     import traceback
                     st.code(traceback.format_exc())
 
+# ...existing code...
+
 def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timestamp, section_data, include_sections=True, progress_callback=None):
     """
     Process EEG data in chunks to handle large files
     """
+    # Standardize input timestamps
+    start_timestamp = standardize_timestamp(start_timestamp)
+    end_timestamp = standardize_timestamp(end_timestamp)
+    
+    # Standardize section timestamps
+    if include_sections and section_data:
+        for section in section_data:
+            section['start'] = standardize_timestamp(section['start'])
+            section['end'] = standardize_timestamp(section['end'])
+    
     # Initialize an empty list to store processed chunks
     processed_chunks = []
     
@@ -356,8 +442,10 @@ def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timesta
     processed_size = 0
     
     try:
-        # Process the file in chunks
-        chunk_iter = get_chunk_iterator(file_path)
+        # Process the file in chunks with smaller chunk size
+        chunk_iter = get_chunk_iterator(file_path, chunksize=500)
+        
+        # Rest of function remains the same...
         
         for i, chunk in enumerate(chunk_iter):
             # Update progress
