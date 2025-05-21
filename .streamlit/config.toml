@@ -1,8 +1,8 @@
 [server]
-maxUploadSize = 5000
+fileWatcherType = "none"
+maxUploadSize = 1000
 enableXsrfProtection = false
 enableCORS = false
-fileWatcherType = "none"
 
 [theme]
 primaryColor = "#50C878"
