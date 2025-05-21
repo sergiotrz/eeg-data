@@ -15,3 +15,9 @@ gatherUsageStats = false
 [runner]
 # Increase memory limit if your Streamlit Cloud instance allows
 magicEnabled = false  # Disable magic for better performance
+
+[server]
+fileWatcherType = "none"
+
+[global]
+disableWatchdogWarning = true
