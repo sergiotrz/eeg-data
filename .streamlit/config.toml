@@ -1,6 +1,6 @@
 [server]
 maxUploadSize = 5000
-enableXsrfProtection = true
+enableXsrfProtection = false
 enableCORS = false
 fileWatcherType = "none"
 
