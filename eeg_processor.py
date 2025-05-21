@@ -60,10 +60,93 @@ def main():
     with tab2:
         combine_multiple_users()
 
+import gc
+import tracemalloc
+import json
+import objgraph
+import streamlit as st
+
 @st.cache_resource
-def get_chunk_iterator(file_path, chunksize=100):  # Reduce from 500 to 100
-    """Get a chunk iterator for large CSV files"""
-    return pd.read_csv(file_path, chunksize=chunksize, low_memory=False)
+def init_tracking_object():
+    tracemalloc.start(10)
+    return {
+        "runs": 0,
+        "tracebacks": {},
+        "snapshot": None
+    }
+
+def compare_snapshots():
+    """Compare memory snapshots to detect leaks"""
+    _TRACES = init_tracking_object()
+    
+    # Force garbage collection
+    gc.collect()
+    
+    # Take new snapshot
+    snapshot = tracemalloc.take_snapshot()
+    
+    if _TRACES["snapshot"] is not None:
+        diff = snapshot.compare_to(_TRACES["snapshot"], "lineno")
+        diff = [d for d in diff if d.count_diff > 0]
+        
+        # Track potential leaks
+        _TRACES["runs"] = _TRACES["runs"] + 1
+        tracebacks = set()
+        
+        for sd in diff:
+            for t in sd.traceback:
+                tracebacks.add(t)
+        
+        # Update traceback counts
+        if "tracebacks" not in _TRACES or len(_TRACES["tracebacks"]) == 0:
+            for t in tracebacks:
+                _TRACES["tracebacks"][str(t)] = 1
+        else:
+            oldTracebacks = set(_TRACES["tracebacks"].keys())
+            intersection = tracebacks.intersection([str(t) for t in oldTracebacks])
+            
+            # Update counts for repeated tracebacks
+            evictions = set()
+            for t in _TRACES["tracebacks"]:
+                if str(t) not in intersection:
+                    evictions.add(t)
+                else:
+                    _TRACES["tracebacks"][str(t)] = _TRACES["tracebacks"][str(t)] + 1
+            
+            # Remove non-repeated traces
+            for t in evictions:
+                del _TRACES["tracebacks"][t]
+        
+        # Display results
+        if _TRACES["runs"] > 1:
+            st.write(f'After {_TRACES["runs"]} runs the following traces were collected:')
+            st.write(json.dumps(_TRACES["tracebacks"], sort_keys=True, indent=4))
+    
+    # Update snapshot
+    _TRACES["snapshot"] = snapshot
+
+def find_leak_sources():
+    """Find objects potentially causing memory leaks"""
+    gc.collect()
+    
+    # Look for session state objects that might be leaked
+    leaked_objects = []
+    for obj in gc.get_objects():
+        if 'SessionState' in str(type(obj)) and obj is not st.session_state:
+            leaked_objects.append(obj)
+        
+        # Also check for DataFrame objects not being released
+        if 'pandas.core.frame.DataFrame' in str(type(obj)):
+            if not hasattr(obj, '_is_view') and len(obj) > 1000:  # Only track large dataframes
+                leaked_objects.append(obj)
+    
+    if leaked_objects:
+        st.write(f"Found {len(leaked_objects)} potential leak sources")
+        for i, obj in enumerate(leaked_objects[:5]):  # Limit to first 5
+            st.write(f"Object {i+1}: {type(obj)}")
+            st.write(f"Size: ~{len(obj) if hasattr(obj, '__len__') else 'unknown'}")
+    else:
+        st.write("No obvious leak sources found")
 
 
 def process_single_user():
