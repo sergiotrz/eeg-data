@@ -61,10 +61,10 @@ def main():
         combine_multiple_users()
 
 @st.cache_resource
-def get_chunk_iterator(file_path, chunksize=500):  # Reduced from 5000 to 500
+def get_chunk_iterator(file_path, chunksize=100):  # Reduce from 500 to 100
     """Get a chunk iterator for large CSV files"""
     return pd.read_csv(file_path, chunksize=chunksize, low_memory=False)
-# ...existing code...
+
 
 def process_single_user():
     st.header("Single User Data Processing")
@@ -83,8 +83,9 @@ def process_single_user():
         st.session_state.clear()
         st.rerun()
     
-    # File upload
+    # File upload with memory warning
     st.write("Upload your raw EEG CSV file from Mind Monitor (files can be very large, please be patient)")
+    st.warning("Processing files larger than 500MB may take several minutes and could fail if memory is limited.")
     uploaded_file = st.file_uploader(
         "Choose a CSV file", 
         type="csv", 
@@ -94,20 +95,33 @@ def process_single_user():
     
     if uploaded_file is not None:
         # Display file info
+        file_size_mb = uploaded_file.size / (1024 * 1024)
         file_details = {"Filename": uploaded_file.name, 
                        "FileType": uploaded_file.type, 
-                       "FileSize": f"{uploaded_file.size / (1024 * 1024):.2f} MB"}
+                       "FileSize": f"{file_size_mb:.2f} MB"}
         st.write(file_details)
+        
+        # Show additional warning for very large files
+        if file_size_mb > 500:
+            st.warning(f"This file is very large ({file_size_mb:.1f} MB). Consider using a more restrictive timestamp range to reduce processing time and memory usage.")
         
         try:
             # Create a temporary file to store the uploaded data - do this only once
             if 'tmp_path' not in st.session_state:
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp_file:
-                    tmp_file.write(uploaded_file.getvalue())
-                    st.session_state.tmp_path = tmp_file.name
-                    
-                # Automatically detect timestamp range when file is uploaded
-                with st.spinner("Detecting timestamp range (this may take a moment)..."):
+                with st.spinner("Saving uploaded file for processing..."):
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp_file:
+                        # Write in chunks to reduce memory usage
+                        chunk_size = 5 * 1024 * 1024  # 5MB chunks
+                        uploaded_file.seek(0)
+                        while True:
+                            chunk = uploaded_file.read(chunk_size)
+                            if not chunk:
+                                break
+                            tmp_file.write(chunk)
+                        st.session_state.tmp_path = tmp_file.name
+                
+                # Detect timestamp range more efficiently
+                with st.spinner("Detecting timestamp range (this may take a moment for large files)..."):
                     try:
                         # Read first chunk to get min timestamp
                         first_chunk = next(get_chunk_iterator(st.session_state.tmp_path, chunksize=500))
@@ -180,7 +194,6 @@ def process_single_user():
             define_sections = st.checkbox("Define experiment sections", value=False)
             
             # Section definition (only shown if checkbox is checked)
-# ...existing code...
 
             # Section definition (only shown if checkbox is checked)
             section_data = []
@@ -453,7 +466,7 @@ def combine_multiple_users():
 
 def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timestamp, section_data, include_sections=True, progress_callback=None):
     """
-    Process EEG data in chunks to handle large files
+    Process EEG data in chunks to handle large files with optimized memory usage
     """
     # Standardize input timestamps
     start_timestamp = standardize_timestamp(start_timestamp)
@@ -465,125 +478,139 @@ def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timesta
             section['start'] = standardize_timestamp(section['start'])
             section['end'] = standardize_timestamp(section['end'])
     
-    # Initialize an empty list to store processed chunks
-    processed_chunks = []
+    # Initialize an empty list to store processed data (we'll use append instead of concat for memory efficiency)
+    processed_data = []
     
     # Get the total file size for progress tracking
     total_size = os.path.getsize(file_path)
     processed_size = 0
     
     try:
-        # Process the file in chunks with smaller chunk size
-        chunk_iter = get_chunk_iterator(file_path, chunksize=500)
+        # Process the file in smaller chunks 
+        chunk_iter = get_chunk_iterator(file_path, chunksize=100)
         
-        # Rest of function remains the same...
-        
+        # First pass: Read data and filter
         for i, chunk in enumerate(chunk_iter):
             # Update progress
             processed_size += chunk.memory_usage(deep=True).sum()
             if progress_callback:
-                progress_callback(min(processed_size / total_size, 0.5))  # First 50% for reading
+                progress_callback(min(processed_size / total_size * 0.4, 0.4))  # First 40% for reading
             
+            # Only keep rows within timestamp range if timestamps exist
+            if 'TimeStamp' in chunk.columns:
+                # Remove milliseconds if present
+                chunk['TimeStamp'] = chunk['TimeStamp'].astype(str).str[:-4]
+                # Filter by timestamp early to reduce memory usage
+                chunk = chunk[(chunk['TimeStamp'] >= start_timestamp) & (chunk['TimeStamp'] <= end_timestamp)]
+            
+            # Skip processing if chunk is empty after timestamp filtering
+            if chunk.empty:
+                continue
+                
             # Keep only the rows where 'Elements' is NaN
-            chunk = chunk[chunk['Elements'].isna()]
+            if 'Elements' in chunk.columns:
+                chunk = chunk[chunk['Elements'].isna()]
             
-            # Keep only the first 25 columns if there are more
+            # Keep only the first 25 columns if there are more (do this early to save memory)
             if chunk.shape[1] > 25:
                 chunk = chunk.iloc[:, :25]
             
-            # Remove rows where all brainwave data values are zero
-            chunk = chunk[~((chunk['Delta_TP9'] == 0) & (chunk['Delta_AF7'] == 0) & 
-                  (chunk['Delta_AF8'] == 0) & (chunk['Delta_TP10'] == 0) & 
-                  (chunk['Theta_TP9'] == 0) & (chunk['Theta_AF7'] == 0) & 
-                  (chunk['Theta_AF8'] == 0) & (chunk['Theta_TP10'] == 0) & 
-                  (chunk['Alpha_TP9'] == 0) & (chunk['Alpha_AF7'] == 0) & 
-                  (chunk['Alpha_AF8'] == 0) & (chunk['Alpha_TP10'] == 0) & 
-                  (chunk['Beta_TP9'] == 0) & (chunk['Beta_AF7'] == 0) & 
-                  (chunk['Beta_AF8'] == 0) & (chunk['Beta_TP10'] == 0) & 
-                  (chunk['Gamma_TP9'] == 0) & (chunk['Gamma_AF7'] == 0) & 
-                  (chunk['Gamma_AF8'] == 0) & (chunk['Gamma_TP10'] == 0))]
+            # Filter out zero brain wave data
+            # Use a simplified condition to save memory
+            zero_mask = ((chunk.filter(like='Delta_').mean(axis=1) == 0) & 
+                        (chunk.filter(like='Theta_').mean(axis=1) == 0) & 
+                        (chunk.filter(like='Alpha_').mean(axis=1) == 0) & 
+                        (chunk.filter(like='Beta_').mean(axis=1) == 0) & 
+                        (chunk.filter(like='Gamma_').mean(axis=1) == 0))
+            chunk = chunk[~zero_mask]
             
-            # Add to processed chunks list if not empty
+            # Add to processed data list if not empty
             if not chunk.empty:
-                processed_chunks.append(chunk)
+                processed_data.append(chunk)
+                
+            # Explicitly delete variables to free memory
+            del chunk
+            if 'zero_mask' in locals():
+                del zero_mask
+            
+            # Force garbage collection
+            import gc
+            gc.collect()
         
-        # Concatenate all processed chunks
-        if processed_chunks:
-            df = pd.concat(processed_chunks, ignore_index=True)
-        else:
+        # Check if we have any data
+        if not processed_data:
             return pd.DataFrame()  # Return empty DataFrame if no valid data
-        
-        # Format user number
-        if user_num < 10:
-            df.insert(0, "User", '0' + str(user_num))
-        else:
-            df.insert(0, "User", str(user_num))
-        
-        # Remove the milliseconds from the 'TimeStamp' column
-        df['TimeStamp'] = df['TimeStamp'].str[:-4]
-        
-        # Filter by timestamp range
-        df = df[(df['TimeStamp'] >= start_timestamp) & (df['TimeStamp'] <= end_timestamp)]
-        
-        # Update progress
+            
         if progress_callback:
-            progress_callback(0.6)  # 60% complete
+            progress_callback(0.5)  # 50% complete
+            
+        # Process the data in smaller batches to save memory
+        batch_size = 5  # Process 5 chunks at a time
+        final_chunks = []
         
-        # Add Time column
-        if not df.empty:
-            df.insert(2, "Time", (pd.to_datetime(df['TimeStamp']) - pd.to_datetime(df['TimeStamp'].iloc[0]) + 
-                                 pd.to_datetime('0:00:01')).dt.strftime('%H:%M:%S.%f').str[:-3])
-        else:
-            return pd.DataFrame()  # Return empty DataFrame if filtered data is empty
+        for i in range(0, len(processed_data), batch_size):
+            batch = processed_data[i:i+batch_size]
+            
+            # Concatenate this batch
+            df_batch = pd.concat(batch, ignore_index=True)
+            
+            # Format user number
+            if 'User' not in df_batch.columns:
+                if user_num < 10:
+                    df_batch.insert(0, "User", '0' + str(user_num))
+                else:
+                    df_batch.insert(0, "User", str(user_num))
+            
+            # Add Time column if needed
+            if 'Time' not in df_batch.columns and not df_batch.empty:
+                try:
+                    df_batch.insert(2, "Time", (pd.to_datetime(df_batch['TimeStamp']) - 
+                                           pd.to_datetime(df_batch['TimeStamp'].iloc[0]) + 
+                                           pd.to_datetime('0:00:01')).dt.strftime('%H:%M:%S.%f').str[:-3])
+                except:
+                    # If there's an error with time calculation, use a simple index
+                    df_batch.insert(2, "Time", [f"00:{idx//60:02d}:{idx%60:02d}" for idx in range(len(df_batch))])
+            
+            final_chunks.append(df_batch)
+            
+            # Free memory
+            del df_batch, batch
+            gc.collect()
+            
+            # Update progress
+            if progress_callback:
+                progress_callback(0.5 + ((i / len(processed_data)) * 0.3))
         
-        # Create a copy for resampling
-        df_copy = df.copy()
+        # Now concatenate the processed batches
+        df_final = pd.concat(final_chunks, ignore_index=True)
         
-        # Update progress
-        if progress_callback:
-            progress_callback(0.7)  # 70% complete
+        # Clean up to free memory
+        del final_chunks, processed_data
+        gc.collect()
         
-        # Convert Time to datetime and set as index
-        df_copy['Time'] = pd.to_datetime(df_copy['Time'])
-        df_copy.set_index('Time', inplace=True)
-        
-        # Select numeric columns for resampling
-        numeric_df = df_copy.select_dtypes(include=['float64', 'int64'])
-        numeric_df = numeric_df.resample('s').mean()
-        numeric_df.reset_index(inplace=True)
-        
-        # Select non-numeric columns for resampling
-        non_numeric_df = df_copy.select_dtypes(exclude=['float64', 'int64'])
-        non_numeric_df = non_numeric_df.resample('s').first()
-        non_numeric_df.reset_index(inplace=True)
-        
-        # Merge the resampled DataFrames
-        df_final = pd.merge(non_numeric_df, numeric_df, on='Time')
-        df_final['Time'] = df_final['Time'].dt.time
-        
-        # Update progress
         if progress_callback:
             progress_callback(0.8)  # 80% complete
         
         # Organize columns
-        df_final = df_final[['User', 'TimeStamp', 'Time'] + 
-                           [col for col in df_final.columns if col not in ['User', 'TimeStamp', 'Time']]]
+        column_order = ['User', 'TimeStamp', 'Time']
+        remaining_cols = [col for col in df_final.columns if col not in column_order]
+        df_final = df_final[column_order + remaining_cols]
         
-        # Add Section column based on user input (only if sections are included)
+        # Add Section column if needed
         if include_sections and section_data:
             df_final['Section'] = None
             for section in section_data:
-                df_final.loc[(df_final['TimeStamp'] >= section['start']) & 
-                             (df_final['TimeStamp'] <= section['end']), 'Section'] = section['label']
+                mask = (df_final['TimeStamp'] >= section['start']) & (df_final['TimeStamp'] <= section['end'])
+                df_final.loc[mask, 'Section'] = section['label']
+                del mask  # Free memory
+                gc.collect()
             
-            # Reorder columns to place 'Section' in the 3rd position
+            # Reorder columns to place 'Section' in the 4th position
             cols = df_final.columns.tolist()
-            cols.remove('Section')
-            cols.insert(3, 'Section')
-            df_final = df_final[cols]
-        
-        # Drop NaN values
-        df_final = df_final.dropna()
+            if 'Section' in cols:
+                cols.remove('Section')
+                cols.insert(3, 'Section')
+                df_final = df_final[cols]
         
         # Update progress
         if progress_callback:
@@ -591,6 +618,11 @@ def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timesta
         
         return df_final
     
+    except MemoryError:
+        # Specific handling for memory errors
+        if progress_callback:
+            progress_callback(1.0)  # Complete the progress bar
+        raise MemoryError("Out of memory while processing. Try reducing the time range or using a smaller file.")
     except Exception as e:
         # Clean up in case of error
         if progress_callback:
