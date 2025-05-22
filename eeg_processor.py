@@ -112,8 +112,26 @@ def process_single_user():
         st.write(file_details)
         try:
             if 'tmp_path' not in st.session_state:
+                # Crear archivo temporal y escribir por chunks para minimizar uso de memoria
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp_file:
-                    tmp_file.write(uploaded_file.getvalue())
+                    # Configurar tamaño de buffer pequeño (1MB)
+                    chunk_size = 1024 * 1024  # 1MB chunks
+                    with st.spinner('Storing uploaded file... this may take a while for large files'):
+                        # Mostrar progreso de carga
+                        progress_bar = st.progress(0)
+                        file_size = uploaded_file.size
+                        bytes_processed = 0
+                        
+                        # Leer y escribir por chunks pequeños, nunca cargando todo el archivo en memoria
+                        while True:
+                            chunk = uploaded_file.read(chunk_size)
+                            if not chunk:
+                                break
+                                
+                            tmp_file.write(chunk)
+                            bytes_processed += len(chunk)
+                            progress_bar.progress(min(bytes_processed / file_size, 1.0))
+                            
                     st.session_state.tmp_path = tmp_file.name
 
             # Detecta automáticamente los timestamps si no están en session_state
@@ -377,10 +395,11 @@ def combine_multiple_users():
 
 def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timestamp, section_data, include_sections=True, progress_callback=None):
     """
-    Procesa cada chunk de datos completamente antes de cargar el siguiente para minimizar el uso de memoria
+    Procesa datos EEG en chunks extremadamente pequeños para minimizar uso de memoria
     """
-    # Solo almacenaremos los chunks ya completamente procesados y resamplados
-    final_processed_chunks = []
+    # Solo almacenaremos datos resamplados
+    resampled_data_buffer = []
+    buffer_size_limit = 100  # Cantidad máxima de chunks resamplados en memoria
     
     # Variables para tracking de progreso
     total_size = os.path.getsize(file_path)
@@ -389,178 +408,197 @@ def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timesta
     # Variable para almacenar el primer timestamp válido (para cálculos relativos)
     first_valid_ts = None
     
+    # DataFrame final
+    df_final = None
+    
     try:
+        if progress_callback:
+            progress_callback(0.05)  # 5% - Iniciando
+            
         # Primera pasada rápida solo para detectar el primer timestamp válido
-        # Esto es necesario para poder calcular tiempos relativos en cada chunk
-        for small_chunk in pd.read_csv(file_path, chunksize=100, low_memory=False):
+        # con chunks extremadamente pequeños
+        for small_chunk in pd.read_csv(file_path, chunksize=50, low_memory=False):
             small_chunk = small_chunk[small_chunk['Elements'].isna()]
             if not small_chunk.empty:
                 small_chunk['TimeStamp'] = small_chunk['TimeStamp'].str[:-4]
                 filtered_chunk = small_chunk[(small_chunk['TimeStamp'] >= start_timestamp) & 
-                                         (small_chunk['TimeStamp'] <= end_timestamp)]
+                                        (small_chunk['TimeStamp'] <= end_timestamp)]
                 if not filtered_chunk.empty:
                     first_valid_ts = pd.to_datetime(filtered_chunk['TimeStamp'].iloc[0])
                     break
             del small_chunk
             
+        if progress_callback:
+            progress_callback(0.1)  # 10% - Timestamp inicial encontrado
+            
         if first_valid_ts is None:
             if progress_callback:
-                progress_callback(1.0)  # Completar la barra de progreso aunque no haya datos
-            return pd.DataFrame()  # No se encontró ningún timestamp válido
-            
-        # Procesamiento completo chunk por chunk
-        chunk_iter = pd.read_csv(file_path, chunksize=100, low_memory=False)  # Chunks muy pequeños
+                progress_callback(1.0)
+            return pd.DataFrame()
+        
+        # Procesamiento chunk por chunk extremadamente pequeños
+        chunk_iter = pd.read_csv(file_path, chunksize=50, low_memory=False)
         
         for i, chunk in enumerate(chunk_iter):
             # Actualizar progreso
-            chunk_size = chunk.memory_usage(deep=True).sum()
-            processed_size += chunk_size
-            if progress_callback:
-                progress_callback(min(processed_size / total_size * 0.8, 0.8))  # 80% del progreso para el procesamiento
+            processed_size += chunk.memory_usage(deep=True).sum()
+            if progress_callback and i % 20 == 0:  # Actualizar cada 20 chunks para no sobrecargar la UI
+                progress_callback(min(0.1 + processed_size / total_size * 0.6, 0.7))  # 10%-70%
             
-            # FILTRADO Y PREPROCESAMIENTO BÁSICO
-            # -----------------------------------
-            # Filtrar filas con Elements no nulos
+            # FILTRADO BÁSICO
+            # Filtrar filas con Elements no nulos y aplicar otros filtros
             chunk = chunk[chunk['Elements'].isna()]
-            
-            # Limitar columnas si hay demasiadas
             if chunk.shape[1] > 25:
                 chunk = chunk.iloc[:, :25]
-            
-            # Eliminar filas donde todos los valores de ondas cerebrales son cero
-            chunk = chunk[~((chunk['Delta_TP9'] == 0) & (chunk['Delta_AF7'] == 0) & 
-                  (chunk['Delta_AF8'] == 0) & (chunk['Delta_TP10'] == 0) & 
-                  (chunk['Theta_TP9'] == 0) & (chunk['Theta_AF7'] == 0) & 
-                  (chunk['Theta_AF8'] == 0) & (chunk['Theta_TP10'] == 0) & 
-                  (chunk['Alpha_TP9'] == 0) & (chunk['Alpha_AF7'] == 0) & 
-                  (chunk['Alpha_AF8'] == 0) & (chunk['Alpha_TP10'] == 0) & 
-                  (chunk['Beta_TP9'] == 0) & (chunk['Beta_AF7'] == 0) & 
-                  (chunk['Beta_AF8'] == 0) & (chunk['Beta_TP10'] == 0) & 
-                  (chunk['Gamma_TP9'] == 0) & (chunk['Gamma_AF7'] == 0) & 
-                  (chunk['Gamma_AF8'] == 0) & (chunk['Gamma_TP10'] == 0))]
+                
+            # Filtro de filas con valores de ondas cerebrales en cero
+            zero_mask = ((chunk['Delta_TP9'] == 0) & (chunk['Delta_AF7'] == 0) & 
+                        (chunk['Delta_AF8'] == 0) & (chunk['Delta_TP10'] == 0) & 
+                        (chunk['Theta_TP9'] == 0) & (chunk['Theta_AF7'] == 0) & 
+                        (chunk['Theta_AF8'] == 0) & (chunk['Theta_TP10'] == 0) & 
+                        (chunk['Alpha_TP9'] == 0) & (chunk['Alpha_AF7'] == 0) & 
+                        (chunk['Alpha_AF8'] == 0) & (chunk['Alpha_TP10'] == 0) & 
+                        (chunk['Beta_TP9'] == 0) & (chunk['Beta_AF7'] == 0) & 
+                        (chunk['Beta_AF8'] == 0) & (chunk['Beta_TP10'] == 0) & 
+                        (chunk['Gamma_TP9'] == 0) & (chunk['Gamma_AF7'] == 0) & 
+                        (chunk['Gamma_AF8'] == 0) & (chunk['Gamma_TP10'] == 0))
+            chunk = chunk[~zero_mask]
             
             # Saltar chunks vacíos
             if chunk.empty:
                 continue
                 
-            # Agregar columna User con formato
+            # Formato y filtros adicionales
             if user_num < 10:
                 chunk.insert(0, "User", '0' + str(user_num))
             else:
                 chunk.insert(0, "User", str(user_num))
             
-            # Eliminar milisegundos del TimeStamp
+            # Eliminar milisegundos y filtrar por timestamp
             chunk['TimeStamp'] = chunk['TimeStamp'].str[:-4]
-            
-            # Filtrar por rango de timestamp
             chunk = chunk[(chunk['TimeStamp'] >= start_timestamp) & 
                           (chunk['TimeStamp'] <= end_timestamp)]
             
-            # Saltar si el chunk filtrado está vacío
             if chunk.empty:
                 continue
             
-            # RESAMPLING INMEDIATO DE ESTE CHUNK
-            # ----------------------------------
-            # Agregar columna Time relativa al primer timestamp
+            # RESAMPLING DE ESTE CHUNK
+            # Agregar columna Time
             chunk.insert(2, "Time", (pd.to_datetime(chunk['TimeStamp']) - first_valid_ts + 
                                    pd.to_datetime('0:00:01')).dt.strftime('%H:%M:%S.%f').str[:-3])
             
-            # Convertir Time a datetime para resampling
+            # Convertir a datetime
             chunk['Time'] = pd.to_datetime(chunk['Time'])
             
-            # Crear copia para resamplear (y liberar el chunk original)
+            # Resampleo
             df_temp = chunk.copy()
-            del chunk  # Liberar memoria del chunk original
+            del chunk
             
             df_temp.set_index('Time', inplace=True)
             
-            # Resamplear columnas numéricas
+            # Procesar columnas numéricas y no numéricas
             numeric_cols = df_temp.select_dtypes(include=['float64', 'int64'])
             if numeric_cols.empty:
-                # No hay columnas numéricas para resamplear
                 del df_temp, numeric_cols
                 continue
                 
             numeric_resampled = numeric_cols.resample('s').mean()
-            del numeric_cols  # Liberar memoria
+            del numeric_cols
             
-            # Resamplear columnas no numéricas
             non_numeric_cols = df_temp.select_dtypes(exclude=['float64', 'int64'])
             if non_numeric_cols.empty:
                 del df_temp, non_numeric_cols, numeric_resampled
                 continue
                 
             non_numeric_resampled = non_numeric_cols.resample('s').first()
-            del non_numeric_cols  # Liberar memoria
-            del df_temp  # Liberar memoria
+            del non_numeric_cols
+            del df_temp
             
-            # Combinar DataFrames resamplados
-            resampled_data = pd.merge(non_numeric_resampled, numeric_resampled, 
-                                     left_index=True, right_index=True)
-            del non_numeric_resampled, numeric_resampled  # Liberar memoria
+            # Combinar columnas resampladas
+            resampled = pd.merge(non_numeric_resampled, numeric_resampled, 
+                                left_index=True, right_index=True)
+            del non_numeric_resampled, numeric_resampled
             
-            resampled_data.reset_index(inplace=True)
+            resampled.reset_index(inplace=True)
             
-            # Guardar este chunk ya completamente procesado
-            final_processed_chunks.append(resampled_data)
-            del resampled_data  # Liberar memoria
+            # Almacenar en buffer
+            resampled_data_buffer.append(resampled)
+            del resampled
+            
+            # Si el buffer llega al límite, combinar y liberar memoria
+            if len(resampled_data_buffer) >= buffer_size_limit:
+                buffer_df = pd.concat(resampled_data_buffer, ignore_index=True)
+                
+                if df_final is None:
+                    df_final = buffer_df
+                else:
+                    df_final = pd.concat([df_final, buffer_df], ignore_index=True)
+                
+                # Limpiar buffer
+                resampled_data_buffer = []
+                del buffer_df
+        
+        # Procesar cualquier dato restante en el buffer
+        if resampled_data_buffer:
+            buffer_df = pd.concat(resampled_data_buffer, ignore_index=True)
+            
+            if df_final is None:
+                df_final = buffer_df
+            else:
+                df_final = pd.concat([df_final, buffer_df], ignore_index=True)
+            
+            del resampled_data_buffer, buffer_df
         
         # Verificar si tenemos datos procesados
-        if not final_processed_chunks:
+        if df_final is None or df_final.empty:
             if progress_callback:
-                progress_callback(1.0)  # Completar la barra de progreso aunque no haya datos
-            return pd.DataFrame()  # No se encontraron datos válidos
+                progress_callback(1.0)
+            return pd.DataFrame()
         
-        # FINALIZACIÓN DEL PROCESAMIENTO
-        # -----------------------------
-        # Combinar todos los chunks ya procesados
-        df_final = pd.concat(final_processed_chunks, ignore_index=True)
-        del final_processed_chunks  # Liberar memoria
+        if progress_callback:
+            progress_callback(0.8)  # 80% - Procesamiento principal completado
         
-        # Eliminar duplicados que pueden surgir en los límites de los chunks
+        # FINALIZACIÓN
+        # Eliminar duplicados
         df_final = df_final.drop_duplicates(subset=['TimeStamp'])
         
-        # Convertir Time nuevamente a formato de tiempo
+        # Convertir Time a formato de tiempo
         df_final['Time'] = df_final['Time'].dt.time
         
-        # Ordenar por timestamp
+        # Organizar y ordenar
         df_final.sort_values('TimeStamp', inplace=True)
-        
-        # Organizar columnas
         df_final = df_final[['User', 'TimeStamp', 'Time'] + 
                           [col for col in df_final.columns if col not in ['User', 'TimeStamp', 'Time']]]
         
-        # Actualizar progreso
-        if progress_callback:
-            progress_callback(0.9)  # 90% completado
-        
-        # Agregar columna Section basada en la entrada del usuario
+        # Agregar secciones si es necesario
         if include_sections and section_data:
             df_final['Section'] = None
-            for section in section_data:
-                df_final.loc[(df_final['TimeStamp'] >= section['start']) & 
-                             (df_final['TimeStamp'] <= section['end']), 'Section'] = section['label']
             
-            # Reordenar columnas para colocar 'Section' en la 3ª posición
+            # Procesar secciones por lotes para minimizar operaciones en memoria
+            for section in section_data:
+                mask = (df_final['TimeStamp'] >= section['start']) & (df_final['TimeStamp'] <= section['end'])
+                df_final.loc[mask, 'Section'] = section['label']
+            
             cols = df_final.columns.tolist()
             cols.remove('Section')
             cols.insert(3, 'Section')
             df_final = df_final[cols]
         
-        # Eliminar valores NaN
+        # Eliminar NaNs
         df_final = df_final.dropna()
         
-        # Actualizar progreso
         if progress_callback:
-            progress_callback(1.0)  # 100% completado
+            progress_callback(1.0)
         
         return df_final
     
     except Exception as e:
-        # Limpiar en caso de error
         if progress_callback:
-            progress_callback(1.0)  # Completar la barra de progreso
+            progress_callback(1.0)
+        if 'resampled_data_buffer' in locals():
+            del resampled_data_buffer
+        if 'df_final' in locals() and df_final is not None:
+            del df_final
         raise e
 
 if __name__ == "__main__":
