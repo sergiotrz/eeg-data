@@ -87,10 +87,6 @@ def process_single_user():
     st.header("Single User Data Processing")
     user_num = st.number_input("User Number", min_value=1, max_value=99, value=1)
 
-<<<<<<< HEAD
-=======
-    # Clear All button - improved to clean temporary files
->>>>>>> 87fbf30 (Approach to fix streamlit cloud errors)
     if st.button("Clear All", key="clear_all"):
         # Clean up temp file if it exists
         if 'tmp_path' in st.session_state and os.path.exists(st.session_state.tmp_path):
