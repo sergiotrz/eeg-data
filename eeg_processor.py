@@ -377,9 +377,9 @@ def combine_multiple_users():
 
 def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timestamp, section_data, include_sections=True, progress_callback=None):
     """
-    Process EEG data in chunks with complete processing per chunk to minimize memory usage
+    Procesa cada chunk de datos completamente antes de cargar el siguiente para minimizar el uso de memoria
     """
-    # Almacenar solo los chunks finales procesados
+    # Solo almacenaremos los chunks ya completamente procesados y resamplados
     final_processed_chunks = []
     
     # Variables para tracking de progreso
@@ -390,18 +390,40 @@ def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timesta
     first_valid_ts = None
     
     try:
-        # Procesamiento por chunks pequeños
-        chunk_iter = get_chunk_iterator(file_path, chunksize=200)  # Chunk size más pequeño
+        # Primera pasada rápida solo para detectar el primer timestamp válido
+        # Esto es necesario para poder calcular tiempos relativos en cada chunk
+        for small_chunk in pd.read_csv(file_path, chunksize=100, low_memory=False):
+            small_chunk = small_chunk[small_chunk['Elements'].isna()]
+            if not small_chunk.empty:
+                small_chunk['TimeStamp'] = small_chunk['TimeStamp'].str[:-4]
+                filtered_chunk = small_chunk[(small_chunk['TimeStamp'] >= start_timestamp) & 
+                                         (small_chunk['TimeStamp'] <= end_timestamp)]
+                if not filtered_chunk.empty:
+                    first_valid_ts = pd.to_datetime(filtered_chunk['TimeStamp'].iloc[0])
+                    break
+            del small_chunk
+            
+        if first_valid_ts is None:
+            if progress_callback:
+                progress_callback(1.0)  # Completar la barra de progreso aunque no haya datos
+            return pd.DataFrame()  # No se encontró ningún timestamp válido
+            
+        # Procesamiento completo chunk por chunk
+        chunk_iter = pd.read_csv(file_path, chunksize=100, low_memory=False)  # Chunks muy pequeños
         
         for i, chunk in enumerate(chunk_iter):
             # Actualizar progreso
-            processed_size += chunk.memory_usage(deep=True).sum()
+            chunk_size = chunk.memory_usage(deep=True).sum()
+            processed_size += chunk_size
             if progress_callback:
-                progress_callback(min(processed_size / total_size, 0.5))  # Primeros 50% para lectura
+                progress_callback(min(processed_size / total_size * 0.8, 0.8))  # 80% del progreso para el procesamiento
             
-            # Filtrado básico
+            # FILTRADO Y PREPROCESAMIENTO BÁSICO
+            # -----------------------------------
+            # Filtrar filas con Elements no nulos
             chunk = chunk[chunk['Elements'].isna()]
             
+            # Limitar columnas si hay demasiadas
             if chunk.shape[1] > 25:
                 chunk = chunk.iloc[:, :25]
             
@@ -437,74 +459,64 @@ def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timesta
             # Saltar si el chunk filtrado está vacío
             if chunk.empty:
                 continue
-                
-            # Registrar el primer timestamp válido para cálculos de tiempo relativos
-            if first_valid_ts is None and not chunk.empty:
-                first_valid_ts = pd.to_datetime(chunk['TimeStamp'].iloc[0])
             
-            # Almacenar para procesamiento posterior
-            final_processed_chunks.append(chunk)
-            
-            # Liberar memoria explícitamente
-            del chunk
-            
-        # Si no se encontraron datos válidos, devolver DataFrame vacío
-        if not final_processed_chunks or first_valid_ts is None:
-            return pd.DataFrame()
-        
-        # Actualizar progreso
-        if progress_callback:
-            progress_callback(0.6)  # 60% completado
-            
-        # Procesamiento por chunks temporales para el resampling
-        resampled_chunks = []
-        
-        for i, chunk in enumerate(final_processed_chunks):
+            # RESAMPLING INMEDIATO DE ESTE CHUNK
+            # ----------------------------------
             # Agregar columna Time relativa al primer timestamp
             chunk.insert(2, "Time", (pd.to_datetime(chunk['TimeStamp']) - first_valid_ts + 
-                                    pd.to_datetime('0:00:01')).dt.strftime('%H:%M:%S.%f').str[:-3])
+                                   pd.to_datetime('0:00:01')).dt.strftime('%H:%M:%S.%f').str[:-3])
             
             # Convertir Time a datetime para resampling
             chunk['Time'] = pd.to_datetime(chunk['Time'])
             
-            # Crear copia para resamplear
+            # Crear copia para resamplear (y liberar el chunk original)
             df_temp = chunk.copy()
+            del chunk  # Liberar memoria del chunk original
+            
             df_temp.set_index('Time', inplace=True)
             
             # Resamplear columnas numéricas
             numeric_cols = df_temp.select_dtypes(include=['float64', 'int64'])
-            if not numeric_cols.empty:
-                numeric_resampled = numeric_cols.resample('s').mean()
-            else:
+            if numeric_cols.empty:
+                # No hay columnas numéricas para resamplear
+                del df_temp, numeric_cols
                 continue
+                
+            numeric_resampled = numeric_cols.resample('s').mean()
+            del numeric_cols  # Liberar memoria
             
             # Resamplear columnas no numéricas
             non_numeric_cols = df_temp.select_dtypes(exclude=['float64', 'int64'])
-            if not non_numeric_cols.empty:
-                non_numeric_resampled = non_numeric_cols.resample('s').first()
-                # Combinar DataFrames resamplados
-                resampled_data = pd.merge(non_numeric_resampled, numeric_resampled, 
-                                         left_index=True, right_index=True)
-                resampled_data.reset_index(inplace=True)
-                resampled_chunks.append(resampled_data)
+            if non_numeric_cols.empty:
+                del df_temp, non_numeric_cols, numeric_resampled
+                continue
+                
+            non_numeric_resampled = non_numeric_cols.resample('s').first()
+            del non_numeric_cols  # Liberar memoria
+            del df_temp  # Liberar memoria
             
-            # Liberar memoria
-            del chunk, df_temp, numeric_cols, non_numeric_cols
+            # Combinar DataFrames resamplados
+            resampled_data = pd.merge(non_numeric_resampled, numeric_resampled, 
+                                     left_index=True, right_index=True)
+            del non_numeric_resampled, numeric_resampled  # Liberar memoria
             
-            # Actualizar progreso por cada chunk procesado
-            if progress_callback and len(final_processed_chunks) > 0:
-                progress_callback(0.6 + 0.2 * ((i + 1) / len(final_processed_chunks)))
+            resampled_data.reset_index(inplace=True)
+            
+            # Guardar este chunk ya completamente procesado
+            final_processed_chunks.append(resampled_data)
+            del resampled_data  # Liberar memoria
         
-        # Liberar memoria de chunks originales filtrados
-        del final_processed_chunks
+        # Verificar si tenemos datos procesados
+        if not final_processed_chunks:
+            if progress_callback:
+                progress_callback(1.0)  # Completar la barra de progreso aunque no haya datos
+            return pd.DataFrame()  # No se encontraron datos válidos
         
-        # Combinar todos los chunks resamplados
-        if resampled_chunks:
-            df_final = pd.concat(resampled_chunks, ignore_index=True)
-            # Liberar memoria
-            del resampled_chunks
-        else:
-            return pd.DataFrame()
+        # FINALIZACIÓN DEL PROCESAMIENTO
+        # -----------------------------
+        # Combinar todos los chunks ya procesados
+        df_final = pd.concat(final_processed_chunks, ignore_index=True)
+        del final_processed_chunks  # Liberar memoria
         
         # Eliminar duplicados que pueden surgir en los límites de los chunks
         df_final = df_final.drop_duplicates(subset=['TimeStamp'])
