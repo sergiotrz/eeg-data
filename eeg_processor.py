@@ -56,7 +56,7 @@ def normalize_timestamp(ts):
     return ts  # Si no hace match, regresa el original
 
 @st.cache_resource
-def get_chunk_iterator(file_path, chunksize=1000):  # Chunk size más pequeño
+def get_chunk_iterator(file_path, chunksize=3000):  # Chunk size más pequeño
     """Get a chunk iterator for large CSV files"""
     return pd.read_csv(file_path, chunksize=chunksize, low_memory=False)
 
