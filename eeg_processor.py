@@ -13,43 +13,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-def normalize_timestamp(timestamp_str):
-    """
-    Normalize timestamp format to ensure days, months, hours, minutes, seconds 
-    all have leading zeros when needed (i.e., 2025-5-4 9:10:34 -> 2025-05-04 09:10:34)
-    """
-    if not timestamp_str or not isinstance(timestamp_str, str):
-        return timestamp_str
-    
-    # Split into date and time parts
-    parts = timestamp_str.strip().split(' ')
-    if len(parts) != 2:
-        return timestamp_str  # Return as-is if format doesn't match expected pattern
-        
-    date_part, time_part = parts
-    
-    # Normalize date (yyyy-mm-dd)
-    date_components = date_part.split('-')
-    if len(date_components) == 3:
-        year, month, day = date_components
-        # Ensure month and day are 2 digits
-        month = month.zfill(2)
-        day = day.zfill(2)
-        date_part = f"{year}-{month}-{day}"
-    
-    # Normalize time (hh:mm:ss)
-    time_components = time_part.split(':')
-    if len(time_components) == 3:
-        hour, minute, second = time_components
-        # Ensure hour, minute, second are 2 digits
-        hour = hour.zfill(2)
-        minute = minute.zfill(2)
-        second = second.zfill(2)
-        time_part = f"{hour}:{minute}:{second}"
-    
-    return f"{date_part} {time_part}"
-
-
 def main():
     st.title("EEG Data Processor")
     
@@ -75,6 +38,45 @@ def main():
     # Tab 2: Combine Multiple Users
     with tab2:
         combine_multiple_users()
+
+def normalize_timestamp(timestamp_str):
+    """
+    Normalize timestamp format to ensure days, months, hours, minutes, seconds 
+    all have leading zeros when needed (i.e., 2025-5-4 9:10:34 -> 2025-05-04 09:10:34)
+    """
+    if not timestamp_str or not isinstance(timestamp_str, str):
+        return timestamp_str
+    
+    # Strip any extra whitespace
+    timestamp_str = timestamp_str.strip()
+    
+    # Split into date and time parts
+    parts = timestamp_str.split(' ')
+    if len(parts) != 2:
+        return timestamp_str  # Return as-is if format doesn't match expected pattern
+        
+    date_part, time_part = parts
+    
+    # Normalize date (yyyy-mm-dd)
+    date_components = date_part.split('-')
+    if len(date_components) == 3:
+        year, month, day = date_components
+        # Ensure month and day are 2 digits
+        month = month.zfill(2)
+        day = day.zfill(2)
+        date_part = f"{year}-{month}-{day}"
+    
+    # Normalize time (hh:mm:ss)
+    time_components = time_part.split(':')
+    if len(time_components) == 3:
+        hour, minute, second = time_components
+        # Ensure hour, minute, second are 2 digits
+        hour = hour.zfill(2)
+        minute = minute.zfill(2)
+        second = second.zfill(2)
+        time_part = f"{hour}:{minute}:{second}"
+    
+    return f"{date_part} {time_part}"
 
 @st.cache_resource
 def get_chunk_iterator(file_path, chunksize=5000):  # Reduced chunk size
