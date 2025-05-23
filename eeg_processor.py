@@ -79,7 +79,7 @@ def normalize_timestamp(timestamp_str):
     return f"{date_part} {time_part}"
 
 @st.cache_resource
-def get_chunk_iterator(file_path, chunksize=5000):  # Reduced chunk size
+def get_chunk_iterator(file_path, chunksize=500000):  # Reduced chunk size
     """Get a chunk iterator for large CSV files"""
     return pd.read_csv(file_path, chunksize=chunksize, low_memory=False)
 
