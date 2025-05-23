@@ -78,11 +78,6 @@ def normalize_timestamp(timestamp_str):
     
     return f"{date_part} {time_part}"
 
-@st.cache_resource
-def get_chunk_iterator(file_path, chunksize=500000):  # Reduced chunk size
-    """Get a chunk iterator for large CSV files"""
-    return pd.read_csv(file_path, chunksize=chunksize, low_memory=False)
-
 def process_single_user():
     st.header("Single User Data Processing")
     
@@ -122,42 +117,17 @@ def process_single_user():
                 st.session_state.min_timestamp = ""
             if 'max_timestamp' not in st.session_state:
                 st.session_state.max_timestamp = ""
-
-
-            """
-            # Preview button
-            if st.button("Generate File Preview"):
-                with st.spinner("Loading file preview..."):
-                    try:
-                        # Read only head and tail portions instead of the full file
-                        head_df = pd.read_csv(st.session_state.tmp_path, nrows=5)
-                        
-                        # For the tail, use a chunk-based approach
-                        tail_df = pd.DataFrame()
-                        for chunk in pd.read_csv(st.session_state.tmp_path, chunksize=1000):
-                            tail_df = chunk.tail(5)
-                        
-                        ellipsis_row = {col: "..." for col in head_df.columns}
-                        ellipsis_df = pd.DataFrame([ellipsis_row])
-                        df_preview = pd.concat([head_df, ellipsis_df, tail_df], ignore_index=True)
-                        st.write("Preview of the uploaded data:")
-                        st.write(df_preview)
-                    except Exception as e:
-                        st.error(f"Error generating preview: {e}")
-            """
             
             # Extract timestamp range with a button
             if st.button("Detect Timestamp Range"):
-                with st.spinner("Detecting timestamp range (this may take a moment)..."):
+                with st.spinner("Detecting timestamp range..."):
                     try:
-                        # Read first chunk to get min timestamp
-                        first_chunk = next(get_chunk_iterator(st.session_state.tmp_path, chunksize=5000))
-                        min_timestamp = first_chunk["TimeStamp"].iloc[0] if "TimeStamp" in first_chunk.columns else ""
+                        # Read first and last rows to get timestamp range
+                        df_head = pd.read_csv(st.session_state.tmp_path, nrows=1)
+                        df_tail = pd.read_csv(st.session_state.tmp_path, skiprows=lambda x: x > 0 and x < os.path.getsize(st.session_state.tmp_path) - 10000)
                         
-                        # Read last chunk to get max timestamp (this is an approximation)
-                        for last_chunk in get_chunk_iterator(st.session_state.tmp_path, chunksize=5000):
-                            pass
-                        max_timestamp = last_chunk["TimeStamp"].iloc[-1] if "TimeStamp" in last_chunk.columns else ""
+                        min_timestamp = df_head["TimeStamp"].iloc[0] if "TimeStamp" in df_head.columns else ""
+                        max_timestamp = df_tail["TimeStamp"].iloc[-1] if "TimeStamp" in df_tail.columns else ""
                         
                         # Remove milliseconds if present
                         min_timestamp = min_timestamp[:19] if isinstance(min_timestamp, str) else ""
@@ -228,12 +198,12 @@ def process_single_user():
             
             # Process button
             if st.button("Process Data"):
-                with st.spinner('Processing data... This may take several minutes for large files'):
+                with st.spinner('Processing data... Please wait'):
                     progress_bar = st.progress(0)
                     
                     try:
-                        # Process the file in chunks
-                        result_df = process_eeg_data_in_chunks(
+                        # Process the file
+                        result_df = process_eeg_data(
                             st.session_state.tmp_path, 
                             user_num,
                             start_timestamp, 
@@ -252,19 +222,6 @@ def process_single_user():
                         
                         # Store processed data in session state
                         st.session_state.processed_data = result_df
-                        
-                        """                        
-                        # Show preview button
-                        if st.button("View Processed Data Preview"):
-                            st.subheader("Processed Data Preview")
-                            head_df = result_df.head(5)
-                            tail_df = result_df.tail(5)
-                            ellipsis_row = {col: "..." for col in result_df.columns}
-                            ellipsis_df = pd.DataFrame([ellipsis_row])
-                            preview_df = pd.concat([head_df, ellipsis_df, tail_df], ignore_index=True)
-                            st.write(preview_df)
-                        """
-
                         
                         # Display summary statistics
                         st.subheader("Data Summary")
@@ -353,15 +310,8 @@ def combine_multiple_users():
                             tmp_path = tmp_file.name
                             temp_files.append(tmp_path)
                         
-                        # Read the file in chunks if it's large
-                        if os.path.getsize(tmp_path) > 50 * 1024 * 1024:  # If file > 50MB
-                            chunks = []
-                            for chunk in pd.read_csv(tmp_path, chunksize=10000):
-                                chunks.append(chunk)
-                            df = pd.concat(chunks, ignore_index=True)
-                        else:
-                            df = pd.read_csv(tmp_path)
-                            
+                        # Read the file directly
+                        df = pd.read_csv(tmp_path)
                         all_dfs.append(df)
                         
                         # Update progress
@@ -387,19 +337,6 @@ def combine_multiple_users():
                         st.session_state.combined_data = df_final
                         
                         st.success('Combining complete!')
-                        
-                        """
-                        # Show preview button 
-                        if st.button("View Combined Data Preview"):
-                            st.subheader("Combined Data Preview")
-                            head_df = df_final.head(5)
-                            tail_df = df_final.tail(5)
-                            ellipsis_row = {col: "..." for col in df_final.columns}
-                            ellipsis_df = pd.DataFrame([ellipsis_row])
-                            preview_df = pd.concat([head_df, ellipsis_df, tail_df], ignore_index=True)
-                            st.write(preview_df)
-                        """
-
                         
                         # Display summary info
                         st.subheader("Dataset Summary")
@@ -432,55 +369,45 @@ def combine_multiple_users():
                     import traceback
                     st.code(traceback.format_exc())
 
-def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timestamp, section_data, include_sections=True, progress_callback=None):
+def process_eeg_data(file_path, user_num, start_timestamp, end_timestamp, section_data, include_sections=True, progress_callback=None):
     """
-    Process EEG data in chunks to handle large files
+    Process EEG data all at once (faster but requires more memory)
     """
-    # Initialize an empty list to store processed chunks
-    processed_chunks = []
-    
-    # Get the total file size for progress tracking
-    total_size = os.path.getsize(file_path)
-    processed_size = 0
-    
     try:
-        # Process the file in chunks
-        chunk_iter = get_chunk_iterator(file_path)
+        # Update progress
+        if progress_callback:
+            progress_callback(0.1)  # 10% - Starting to read file
         
-        for i, chunk in enumerate(chunk_iter):
-            # Update progress
-            processed_size += chunk.memory_usage(deep=True).sum()
-            if progress_callback:
-                progress_callback(min(processed_size / total_size, 0.5))  # First 50% for reading
-            
-            # Keep only the rows where 'Elements' is NaN
-            chunk = chunk[chunk['Elements'].isna()]
-            
-            # Keep only the first 25 columns if there are more
-            if chunk.shape[1] > 25:
-                chunk = chunk.iloc[:, :25]
-            
-            # Remove rows where all brainwave data values are zero
-            chunk = chunk[~((chunk['Delta_TP9'] == 0) & (chunk['Delta_AF7'] == 0) & 
-                  (chunk['Delta_AF8'] == 0) & (chunk['Delta_TP10'] == 0) & 
-                  (chunk['Theta_TP9'] == 0) & (chunk['Theta_AF7'] == 0) & 
-                  (chunk['Theta_AF8'] == 0) & (chunk['Theta_TP10'] == 0) & 
-                  (chunk['Alpha_TP9'] == 0) & (chunk['Alpha_AF7'] == 0) & 
-                  (chunk['Alpha_AF8'] == 0) & (chunk['Alpha_TP10'] == 0) & 
-                  (chunk['Beta_TP9'] == 0) & (chunk['Beta_AF7'] == 0) & 
-                  (chunk['Beta_AF8'] == 0) & (chunk['Beta_TP10'] == 0) & 
-                  (chunk['Gamma_TP9'] == 0) & (chunk['Gamma_AF7'] == 0) & 
-                  (chunk['Gamma_AF8'] == 0) & (chunk['Gamma_TP10'] == 0))]
-            
-            # Add to processed chunks list if not empty
-            if not chunk.empty:
-                processed_chunks.append(chunk)
+        # Read the entire file at once
+        df = pd.read_csv(file_path, low_memory=False)
         
-        # Concatenate all processed chunks
-        if processed_chunks:
-            df = pd.concat(processed_chunks, ignore_index=True)
-        else:
-            return pd.DataFrame()  # Return empty DataFrame if no valid data
+        # Update progress
+        if progress_callback:
+            progress_callback(0.3)  # 30% - File loaded
+        
+        # Filter data
+        # Keep only the rows where 'Elements' is NaN
+        df = df[df['Elements'].isna()]
+        
+        # Keep only the first 25 columns if there are more
+        if df.shape[1] > 25:
+            df = df.iloc[:, :25]
+        
+        # Remove rows where all brainwave data values are zero
+        df = df[~((df['Delta_TP9'] == 0) & (df['Delta_AF7'] == 0) & 
+              (df['Delta_AF8'] == 0) & (df['Delta_TP10'] == 0) & 
+              (df['Theta_TP9'] == 0) & (df['Theta_AF7'] == 0) & 
+              (df['Theta_AF8'] == 0) & (df['Theta_TP10'] == 0) & 
+              (df['Alpha_TP9'] == 0) & (df['Alpha_AF7'] == 0) & 
+              (df['Alpha_AF8'] == 0) & (df['Alpha_TP10'] == 0) & 
+              (df['Beta_TP9'] == 0) & (df['Beta_AF7'] == 0) & 
+              (df['Beta_AF8'] == 0) & (df['Beta_TP10'] == 0) & 
+              (df['Gamma_TP9'] == 0) & (df['Gamma_AF7'] == 0) & 
+              (df['Gamma_AF8'] == 0) & (df['Gamma_TP10'] == 0))]
+        
+        # Update progress
+        if progress_callback:
+            progress_callback(0.4)  # 40% - Initial filtering done
         
         # Format user number
         if user_num < 10:
@@ -488,6 +415,10 @@ def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timesta
         else:
             df.insert(0, "User", str(user_num))
 
+        # Normalize timestamps
+        start_timestamp = normalize_timestamp(start_timestamp)
+        end_timestamp = normalize_timestamp(end_timestamp)
+        
         # Normalize section timestamps
         for section in section_data:
             section['start'] = normalize_timestamp(section['start'])
@@ -501,7 +432,7 @@ def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timesta
         
         # Update progress
         if progress_callback:
-            progress_callback(0.6)  # 60% complete
+            progress_callback(0.6)  # 60% - Time filtering complete
         
         # Add Time column with explicit format
         if not df.empty:
@@ -516,12 +447,11 @@ def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timesta
         
         # Update progress
         if progress_callback:
-            progress_callback(0.7)  # 70% complete
+            progress_callback(0.7)  # 70% - Prepared for resampling
         
         # Convert Time to datetime and set as index with explicit format
         df_copy['Time'] = pd.to_datetime(df_copy['Time'], format="%H:%M:%S.%f")
         df_copy.set_index('Time', inplace=True)
-    
         
         # Select numeric columns for resampling
         numeric_df = df_copy.select_dtypes(include=['float64', 'int64'])
@@ -539,7 +469,7 @@ def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timesta
         
         # Update progress
         if progress_callback:
-            progress_callback(0.8)  # 80% complete
+            progress_callback(0.8)  # 80% - Resampling complete
         
         # Organize columns
         df_final = df_final[['User', 'TimeStamp', 'Time'] + 
@@ -563,7 +493,7 @@ def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timesta
         
         # Update progress
         if progress_callback:
-            progress_callback(1.0)  # 100% complete
+            progress_callback(1.0)  # 100% - Processing complete
         
         return df_final
     
