@@ -13,6 +13,42 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+def normalize_timestamp(timestamp_str):
+    """
+    Normalize timestamp format to ensure days, months, hours, minutes, seconds 
+    all have leading zeros when needed (i.e., 2025-5-4 9:10:34 -> 2025-05-04 09:10:34)
+    """
+    if not timestamp_str or not isinstance(timestamp_str, str):
+        return timestamp_str
+    
+    # Split into date and time parts
+    parts = timestamp_str.strip().split(' ')
+    if len(parts) != 2:
+        return timestamp_str  # Return as-is if format doesn't match expected pattern
+        
+    date_part, time_part = parts
+    
+    # Normalize date (yyyy-mm-dd)
+    date_components = date_part.split('-')
+    if len(date_components) == 3:
+        year, month, day = date_components
+        # Ensure month and day are 2 digits
+        month = month.zfill(2)
+        day = day.zfill(2)
+        date_part = f"{year}-{month}-{day}"
+    
+    # Normalize time (hh:mm:ss)
+    time_components = time_part.split(':')
+    if len(time_components) == 3:
+        hour, minute, second = time_components
+        # Ensure hour, minute, second are 2 digits
+        hour = hour.zfill(2)
+        minute = minute.zfill(2)
+        second = second.zfill(2)
+        time_part = f"{hour}:{minute}:{second}"
+    
+    return f"{date_part} {time_part}"
+
 
 def main():
     st.title("EEG Data Processor")
@@ -40,63 +76,23 @@ def main():
     with tab2:
         combine_multiple_users()
 
-def normalize_timestamp(ts):
-    """
-    Normaliza un timestamp a formato YYYY-MM-DD HH:MM:SS
-    Si la hora, minuto o segundo tiene un solo dígito, agrega un cero.
-    """
-    import re
-    if not ts:
-        return ""
-    # Busca el patrón de fecha y hora
-    match = re.match(r"(\d{4}-\d{2}-\d{2})\s+(\d{1,2}):(\d{1,2}):(\d{1,2})", ts.strip())
-    if match:
-        date, h, m, s = match.groups()
-        return f"{date} {int(h):02d}:{int(m):02d}:{int(s):02d}"
-    return ts  # Si no hace match, regresa el original
-
 @st.cache_resource
-def get_chunk_iterator(file_path, chunksize=50000):  # Chunk size más pequeño
+def get_chunk_iterator(file_path, chunksize=5000):  # Reduced chunk size
     """Get a chunk iterator for large CSV files"""
     return pd.read_csv(file_path, chunksize=chunksize, low_memory=False)
 
-def detect_min_max_timestamp(file_path):
-    """
-    Detecta el timestamp mínimo y máximo del archivo de entrada.
-    """
-    min_ts, max_ts = "", ""
-    try:
-        # Lee el primer chunk para el mínimo
-        for chunk in pd.read_csv(file_path, chunksize=1000):
-            if "TimeStamp" in chunk.columns:
-                min_ts = chunk["TimeStamp"].iloc[0]
-                break
-        # Lee el último chunk para el máximo
-        for chunk in pd.read_csv(file_path, chunksize=1000):
-            pass
-        if "TimeStamp" in chunk.columns:
-            max_ts = chunk["TimeStamp"].iloc[-1]
-        # Quita milisegundos si existen
-        min_ts = min_ts[:19] if isinstance(min_ts, str) else ""
-        max_ts = max_ts[:19] if isinstance(max_ts, str) else ""
-    except Exception:
-        pass
-    return min_ts, max_ts
-
 def process_single_user():
     st.header("Single User Data Processing")
+    
+    # User number input
     user_num = st.number_input("User Number", min_value=1, max_value=99, value=1)
 
+    # Clear All button
     if st.button("Clear All", key="clear_all"):
-        # Clean up temp file if it exists
-        if 'tmp_path' in st.session_state and os.path.exists(st.session_state.tmp_path):
-            try:
-                os.unlink(st.session_state.tmp_path)
-            except Exception:
-                pass
         st.session_state.clear()
         st.rerun()
-
+    
+    # File upload
     st.write("Upload your raw EEG CSV file from Mind Monitor (files can be very large, please be patient)")
     uploaded_file = st.file_uploader(
         "Choose a CSV file", 
@@ -104,99 +100,137 @@ def process_single_user():
         accept_multiple_files=False,
         help="Upload the raw EEG data CSV file from Mind Monitor"
     )
-
+    
     if uploaded_file is not None:
+        # Display file info
         file_details = {"Filename": uploaded_file.name, 
                        "FileType": uploaded_file.type, 
                        "FileSize": f"{uploaded_file.size / (1024 * 1024):.2f} MB"}
         st.write(file_details)
+        
         try:
+            # Create a temporary file to store the uploaded data - do this only once
             if 'tmp_path' not in st.session_state:
-                # Crear archivo temporal y escribir por chunks para minimizar uso de memoria
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp_file:
-                    # Configurar tamaño de buffer pequeño (1MB)
-                    chunk_size = 1024 * 1024  # 1MB chunks
-                    with st.spinner('Storing uploaded file... this may take a while for large files'):
-                        # Mostrar progreso de carga
-                        progress_bar = st.progress(0)
-                        file_size = uploaded_file.size
-                        bytes_processed = 0
-                        
-                        # Leer y escribir por chunks pequeños, nunca cargando todo el archivo en memoria
-                        while True:
-                            chunk = uploaded_file.read(chunk_size)
-                            if not chunk:
-                                break
-                                
-                            tmp_file.write(chunk)
-                            bytes_processed += len(chunk)
-                            progress_bar.progress(min(bytes_processed / file_size, 1.0))
-                            
+                    tmp_file.write(uploaded_file.getvalue())
                     st.session_state.tmp_path = tmp_file.name
+            
+            # Initialize timestamp variables if not in session state
+            if 'min_timestamp' not in st.session_state:
+                st.session_state.min_timestamp = ""
+            if 'max_timestamp' not in st.session_state:
+                st.session_state.max_timestamp = ""
 
-            # Detecta automáticamente los timestamps si no están en session_state
-            if 'min_timestamp' not in st.session_state or 'max_timestamp' not in st.session_state:
-                min_ts, max_ts = detect_min_max_timestamp(st.session_state.tmp_path)
-                st.session_state.min_timestamp = min_ts
-                st.session_state.max_timestamp = max_ts
 
-            # Timestamp range inputs con normalización automática
+            """
+            # Preview button
+            if st.button("Generate File Preview"):
+                with st.spinner("Loading file preview..."):
+                    try:
+                        # Read only head and tail portions instead of the full file
+                        head_df = pd.read_csv(st.session_state.tmp_path, nrows=5)
+                        
+                        # For the tail, use a chunk-based approach
+                        tail_df = pd.DataFrame()
+                        for chunk in pd.read_csv(st.session_state.tmp_path, chunksize=1000):
+                            tail_df = chunk.tail(5)
+                        
+                        ellipsis_row = {col: "..." for col in head_df.columns}
+                        ellipsis_df = pd.DataFrame([ellipsis_row])
+                        df_preview = pd.concat([head_df, ellipsis_df, tail_df], ignore_index=True)
+                        st.write("Preview of the uploaded data:")
+                        st.write(df_preview)
+                    except Exception as e:
+                        st.error(f"Error generating preview: {e}")
+            """
+            
+            # Extract timestamp range with a button
+            if st.button("Detect Timestamp Range"):
+                with st.spinner("Detecting timestamp range (this may take a moment)..."):
+                    try:
+                        # Read first chunk to get min timestamp
+                        first_chunk = next(get_chunk_iterator(st.session_state.tmp_path, chunksize=5000))
+                        min_timestamp = first_chunk["TimeStamp"].iloc[0] if "TimeStamp" in first_chunk.columns else ""
+                        
+                        # Read last chunk to get max timestamp (this is an approximation)
+                        for last_chunk in get_chunk_iterator(st.session_state.tmp_path, chunksize=5000):
+                            pass
+                        max_timestamp = last_chunk["TimeStamp"].iloc[-1] if "TimeStamp" in last_chunk.columns else ""
+                        
+                        # Remove milliseconds if present
+                        min_timestamp = min_timestamp[:19] if isinstance(min_timestamp, str) else ""
+                        max_timestamp = max_timestamp[:19] if isinstance(max_timestamp, str) else ""
+                        
+                        # Store in session state
+                        st.session_state.min_timestamp = min_timestamp
+                        st.session_state.max_timestamp = max_timestamp
+                        
+                        st.success("Timestamp range detected!")
+                    except Exception as e:
+                        st.warning(f"Couldn't detect timestamp range: {e}")
+            
+            # Timestamp range inputs
             st.subheader("Timestamp Range")
             if st.session_state.min_timestamp and st.session_state.max_timestamp:
                 st.write(f"Detected timestamp range: {st.session_state.min_timestamp} to {st.session_state.max_timestamp}")
-
+            
+            # Add normalization to timestamp inputs
             col1, col2 = st.columns(2)
             with col1:
-                start_timestamp = st.text_input(
-                    "Start timestamp (YYYY-MM-DD HH:MM:SS)",
-                    value=st.session_state.min_timestamp,
-                    key="start_ts"
-                )
+                start_timestamp_input = st.text_input("Start timestamp (YYYY-MM-DD HH:MM:SS)", value=st.session_state.min_timestamp)
+                start_timestamp = normalize_timestamp(start_timestamp_input)
+                if start_timestamp != start_timestamp_input and start_timestamp_input:
+                    st.info(f"Normalized timestamp: {start_timestamp}")
             with col2:
-                end_timestamp = st.text_input(
-                    "End timestamp (YYYY-MM-DD HH:MM:SS)",
-                    value=st.session_state.max_timestamp,
-                    key="end_ts"
-                )
-
-            # Normaliza los timestamps automáticamente
-            start_timestamp = normalize_timestamp(start_timestamp)
-            end_timestamp = normalize_timestamp(end_timestamp)
-
+                end_timestamp_input = st.text_input("End timestamp (YYYY-MM-DD HH:MM:SS)", value=st.session_state.max_timestamp)
+                end_timestamp = normalize_timestamp(end_timestamp_input)
+                if end_timestamp != end_timestamp_input and end_timestamp_input:
+                    st.info(f"Normalized timestamp: {end_timestamp}")
+            
+            # Option to define sections
             define_sections = st.checkbox("Define experiment sections", value=False)
+            
+            # Section definition with normalized timestamps
             section_data = []
             if define_sections:
                 st.subheader("Define Sections")
                 st.write("Define the different phases/sections of your experiment with their timestamp ranges:")
                 num_sections = st.number_input("Number of sections", min_value=1, max_value=10, value=3)
+
+                # Create inputs for each section using timestamp values
                 for i in range(int(num_sections)):
                     st.markdown(f"**Section {i+1}**")
                     col1, col2, col3 = st.columns(3)
                     with col1:
                         section_label = st.text_input(f"Label for Section {i+1}", value=f"{i+1}", key=f"label_{i}")
                     with col2:
-                        section_start = st.text_input(
+                        section_start_input = st.text_input(
                             f"Start time (YYYY-MM-DD HH:MM:SS)",
-                            value=start_timestamp,
+                            value=start_timestamp_input,
                             key=f"start_{i}"
                         )
+                        section_start = normalize_timestamp(section_start_input)
                     with col3:
-                        section_end = st.text_input(
+                        section_end_input = st.text_input(
                             f"End time (YYYY-MM-DD HH:MM:SS)",
-                            value=end_timestamp,
+                            value=end_timestamp_input,
                             key=f"end_{i}"
                         )
-                    # Normaliza los timestamps de sección
+                        section_end = normalize_timestamp(section_end_input)
+                    
                     section_data.append({
                         "label": section_label,
-                        "start": normalize_timestamp(section_start),
-                        "end": normalize_timestamp(section_end)
+                        "start": section_start,
+                        "end": section_end
                     })
-
+            
+            # Process button
             if st.button("Process Data"):
                 with st.spinner('Processing data... This may take several minutes for large files'):
                     progress_bar = st.progress(0)
+                    
                     try:
+                        # Process the file in chunks
                         result_df = process_eeg_data_in_chunks(
                             st.session_state.tmp_path, 
                             user_num,
@@ -206,17 +240,42 @@ def process_single_user():
                             include_sections=define_sections,
                             progress_callback=lambda x: progress_bar.progress(x)
                         )
+                        
                         if result_df.empty:
                             st.error("No valid data found after processing. Check your timestamp range and filters.")
                             return
+                        
+                        # Display result
                         st.success('Processing complete!')
+                        
+                        # Store processed data in session state
                         st.session_state.processed_data = result_df
+                        
+                        """                        
+                        # Show preview button
+                        if st.button("View Processed Data Preview"):
+                            st.subheader("Processed Data Preview")
+                            head_df = result_df.head(5)
+                            tail_df = result_df.tail(5)
+                            ellipsis_row = {col: "..." for col in result_df.columns}
+                            ellipsis_df = pd.DataFrame([ellipsis_row])
+                            preview_df = pd.concat([head_df, ellipsis_df, tail_df], ignore_index=True)
+                            st.write(preview_df)
+                        """
+
+                        
+                        # Display summary statistics
                         st.subheader("Data Summary")
                         st.write(f"Total rows: {len(result_df)}")
                         st.write(f"Time range: {result_df['Time'].iloc[0]} to {result_df['Time'].iloc[-1]}")
+                        
+                        # Only display section info if sections were defined
                         if define_sections:
                             st.write(f"Sections: {result_df['Section'].nunique()}")
+                
                         output_filename = f"user_{user_num}_processed.csv"
+                        
+                        # Allow user to download the processed file
                         csv = result_df.to_csv(index=False)
                         st.download_button(
                             label="Download Processed Data",
@@ -224,23 +283,26 @@ def process_single_user():
                             file_name=output_filename,
                             mime="text/csv"
                         )
+                    
                     except MemoryError:
                         st.error("Out of memory. Try processing a smaller file or reduce the time range.")
                     except Exception as e:
                         st.error(f"An error occurred during processing: {e}")
                         import traceback
                         st.code(traceback.format_exc())
+            
         except Exception as e:
             st.error(f"An error occurred: {e}")
             import traceback
             st.code(traceback.format_exc())
+            
+            # Clean up temp file in case of error
             if 'tmp_path' in st.session_state and os.path.exists(st.session_state.tmp_path):
                 try:
                     os.unlink(st.session_state.tmp_path)
                     del st.session_state.tmp_path
                 except:
                     pass
-
 
 def combine_multiple_users():
     st.header("Combine Multiple Preprocessed Datasets")
@@ -250,16 +312,8 @@ def combine_multiple_users():
     to combine them into a single dataset for group analysis.
     """)
 
-    # Clear All button - improved to clean temporary files
+    # Clear All button
     if st.button("Clear All", key="clear_all_combined"):
-        # Clean up any temporary files that might be in session state
-        if 'temp_files' in st.session_state:
-            for tmp_path in st.session_state.temp_files:
-                if os.path.exists(tmp_path):
-                    try:
-                        os.unlink(tmp_path)
-                    except:
-                        pass
         st.session_state.clear()
         st.rerun()
     
@@ -281,7 +335,6 @@ def combine_multiple_users():
                 st.write(file_details)
         
         # Process button
-        # Process button
         if st.button("Combine Data"):
             with st.spinner('Combining data...'):
                 progress_bar = st.progress(0)
@@ -298,10 +351,10 @@ def combine_multiple_users():
                             tmp_path = tmp_file.name
                             temp_files.append(tmp_path)
                         
-                        # Read the file in smaller chunks if it's large
+                        # Read the file in chunks if it's large
                         if os.path.getsize(tmp_path) > 50 * 1024 * 1024:  # If file > 50MB
                             chunks = []
-                            for chunk in pd.read_csv(tmp_path, chunksize=500):  # Smaller chunk size
+                            for chunk in pd.read_csv(tmp_path, chunksize=10000):
                                 chunks.append(chunk)
                             df = pd.concat(chunks, ignore_index=True)
                         else:
@@ -311,10 +364,6 @@ def combine_multiple_users():
                         
                         # Update progress
                         progress_bar.progress((i + 1) / len(uploaded_files))
-                    
-                    # Store temp files in session state for later cleanup
-                    st.session_state.temp_files = temp_files
-
                     
                     # Concatenate all DataFrames
                     if all_dfs:
@@ -368,237 +417,160 @@ def combine_multiple_users():
                         )
                     else:
                         st.error("No valid data found in the uploaded files.")
-
-                    # Clean up temp files after processing
+                    
+                    # Clean up temp files
                     for tmp_path in temp_files:
                         try:
                             os.unlink(tmp_path)
                         except:
                             pass
-                    # Remove from session state
-                    if 'temp_files' in st.session_state:
-                        del st.session_state.temp_files
                             
                 except Exception as e:
                     st.error(f"An error occurred during combining: {e}")
                     import traceback
                     st.code(traceback.format_exc())
-                                    # Clean up temp files in case of error
-                    for tmp_path in temp_files:
-                        try:
-                            os.unlink(tmp_path)
-                        except:
-                            pass
-                    # Remove from session state
-                    if 'temp_files' in st.session_state:
-                        del st.session_state.temp_files
 
 def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timestamp, section_data, include_sections=True, progress_callback=None):
     """
-    Procesa datos EEG en chunks extremadamente pequeños para minimizar uso de memoria
+    Process EEG data in chunks to handle large files
     """
-    # Solo almacenaremos datos resamplados
-    resampled_data_buffer = []
-    buffer_size_limit = 100  # Cantidad máxima de chunks resamplados en memoria
+    # Initialize an empty list to store processed chunks
+    processed_chunks = []
     
-    # Variables para tracking de progreso
+    # Get the total file size for progress tracking
     total_size = os.path.getsize(file_path)
     processed_size = 0
     
-    # Variable para almacenar el primer timestamp válido (para cálculos relativos)
-    first_valid_ts = None
-    
-    # DataFrame final
-    df_final = None
-    
     try:
-        if progress_callback:
-            progress_callback(0.05)  # 5% - Iniciando
-            
-        # Primera pasada rápida solo para detectar el primer timestamp válido
-        # con chunks extremadamente pequeños
-        for small_chunk in pd.read_csv(file_path, chunksize=50, low_memory=False):
-            small_chunk = small_chunk[small_chunk['Elements'].isna()]
-            if not small_chunk.empty:
-                small_chunk['TimeStamp'] = small_chunk['TimeStamp'].str[:-4]
-                filtered_chunk = small_chunk[(small_chunk['TimeStamp'] >= start_timestamp) & 
-                                        (small_chunk['TimeStamp'] <= end_timestamp)]
-                if not filtered_chunk.empty:
-                    first_valid_ts = pd.to_datetime(filtered_chunk['TimeStamp'].iloc[0])
-                    break
-            del small_chunk
-            
-        if progress_callback:
-            progress_callback(0.1)  # 10% - Timestamp inicial encontrado
-            
-        if first_valid_ts is None:
-            if progress_callback:
-                progress_callback(1.0)
-            return pd.DataFrame()
-        
-        # Procesamiento chunk por chunk extremadamente pequeños
-        chunk_iter = pd.read_csv(file_path, chunksize=50, low_memory=False)
+        # Process the file in chunks
+        chunk_iter = get_chunk_iterator(file_path)
         
         for i, chunk in enumerate(chunk_iter):
-            # Actualizar progreso
+            # Update progress
             processed_size += chunk.memory_usage(deep=True).sum()
-            if progress_callback and i % 20 == 0:  # Actualizar cada 20 chunks para no sobrecargar la UI
-                progress_callback(min(0.1 + processed_size / total_size * 0.6, 0.7))  # 10%-70%
+            if progress_callback:
+                progress_callback(min(processed_size / total_size, 0.5))  # First 50% for reading
             
-            # FILTRADO BÁSICO
-            # Filtrar filas con Elements no nulos y aplicar otros filtros
+            # Keep only the rows where 'Elements' is NaN
             chunk = chunk[chunk['Elements'].isna()]
+            
+            # Keep only the first 25 columns if there are more
             if chunk.shape[1] > 25:
                 chunk = chunk.iloc[:, :25]
-                
-            # Filtro de filas con valores de ondas cerebrales en cero
-            zero_mask = ((chunk['Delta_TP9'] == 0) & (chunk['Delta_AF7'] == 0) & 
-                        (chunk['Delta_AF8'] == 0) & (chunk['Delta_TP10'] == 0) & 
-                        (chunk['Theta_TP9'] == 0) & (chunk['Theta_AF7'] == 0) & 
-                        (chunk['Theta_AF8'] == 0) & (chunk['Theta_TP10'] == 0) & 
-                        (chunk['Alpha_TP9'] == 0) & (chunk['Alpha_AF7'] == 0) & 
-                        (chunk['Alpha_AF8'] == 0) & (chunk['Alpha_TP10'] == 0) & 
-                        (chunk['Beta_TP9'] == 0) & (chunk['Beta_AF7'] == 0) & 
-                        (chunk['Beta_AF8'] == 0) & (chunk['Beta_TP10'] == 0) & 
-                        (chunk['Gamma_TP9'] == 0) & (chunk['Gamma_AF7'] == 0) & 
-                        (chunk['Gamma_AF8'] == 0) & (chunk['Gamma_TP10'] == 0))
-            chunk = chunk[~zero_mask]
             
-            # Saltar chunks vacíos
-            if chunk.empty:
-                continue
-                
-            # Formato y filtros adicionales
-            if user_num < 10:
-                chunk.insert(0, "User", '0' + str(user_num))
-            else:
-                chunk.insert(0, "User", str(user_num))
+            # Remove rows where all brainwave data values are zero
+            chunk = chunk[~((chunk['Delta_TP9'] == 0) & (chunk['Delta_AF7'] == 0) & 
+                  (chunk['Delta_AF8'] == 0) & (chunk['Delta_TP10'] == 0) & 
+                  (chunk['Theta_TP9'] == 0) & (chunk['Theta_AF7'] == 0) & 
+                  (chunk['Theta_AF8'] == 0) & (chunk['Theta_TP10'] == 0) & 
+                  (chunk['Alpha_TP9'] == 0) & (chunk['Alpha_AF7'] == 0) & 
+                  (chunk['Alpha_AF8'] == 0) & (chunk['Alpha_TP10'] == 0) & 
+                  (chunk['Beta_TP9'] == 0) & (chunk['Beta_AF7'] == 0) & 
+                  (chunk['Beta_AF8'] == 0) & (chunk['Beta_TP10'] == 0) & 
+                  (chunk['Gamma_TP9'] == 0) & (chunk['Gamma_AF7'] == 0) & 
+                  (chunk['Gamma_AF8'] == 0) & (chunk['Gamma_TP10'] == 0))]
             
-            # Eliminar milisegundos y filtrar por timestamp
-            chunk['TimeStamp'] = chunk['TimeStamp'].str[:-4]
-            chunk = chunk[(chunk['TimeStamp'] >= start_timestamp) & 
-                          (chunk['TimeStamp'] <= end_timestamp)]
-            
-            if chunk.empty:
-                continue
-            
-            # RESAMPLING DE ESTE CHUNK
-            # Agregar columna Time
-            chunk.insert(2, "Time", (pd.to_datetime(chunk['TimeStamp']) - first_valid_ts + 
-                                   pd.to_datetime('0:00:01')).dt.strftime('%H:%M:%S.%f').str[:-3])
-            
-            # Convertir a datetime
-            chunk['Time'] = pd.to_datetime(chunk['Time'])
-            
-            # Resampleo
-            df_temp = chunk.copy()
-            del chunk
-            
-            df_temp.set_index('Time', inplace=True)
-            
-            # Procesar columnas numéricas y no numéricas
-            numeric_cols = df_temp.select_dtypes(include=['float64', 'int64'])
-            if numeric_cols.empty:
-                del df_temp, numeric_cols
-                continue
-                
-            numeric_resampled = numeric_cols.resample('s').mean()
-            del numeric_cols
-            
-            non_numeric_cols = df_temp.select_dtypes(exclude=['float64', 'int64'])
-            if non_numeric_cols.empty:
-                del df_temp, non_numeric_cols, numeric_resampled
-                continue
-                
-            non_numeric_resampled = non_numeric_cols.resample('s').first()
-            del non_numeric_cols
-            del df_temp
-            
-            # Combinar columnas resampladas
-            resampled = pd.merge(non_numeric_resampled, numeric_resampled, 
-                                left_index=True, right_index=True)
-            del non_numeric_resampled, numeric_resampled
-            
-            resampled.reset_index(inplace=True)
-            
-            # Almacenar en buffer
-            resampled_data_buffer.append(resampled)
-            del resampled
-            
-            # Si el buffer llega al límite, combinar y liberar memoria
-            if len(resampled_data_buffer) >= buffer_size_limit:
-                buffer_df = pd.concat(resampled_data_buffer, ignore_index=True)
-                
-                if df_final is None:
-                    df_final = buffer_df
-                else:
-                    df_final = pd.concat([df_final, buffer_df], ignore_index=True)
-                
-                # Limpiar buffer
-                resampled_data_buffer = []
-                del buffer_df
+            # Add to processed chunks list if not empty
+            if not chunk.empty:
+                processed_chunks.append(chunk)
         
-        # Procesar cualquier dato restante en el buffer
-        if resampled_data_buffer:
-            buffer_df = pd.concat(resampled_data_buffer, ignore_index=True)
-            
-            if df_final is None:
-                df_final = buffer_df
-            else:
-                df_final = pd.concat([df_final, buffer_df], ignore_index=True)
-            
-            del resampled_data_buffer, buffer_df
+        # Concatenate all processed chunks
+        if processed_chunks:
+            df = pd.concat(processed_chunks, ignore_index=True)
+        else:
+            return pd.DataFrame()  # Return empty DataFrame if no valid data
         
-        # Verificar si tenemos datos procesados
-        if df_final is None or df_final.empty:
-            if progress_callback:
-                progress_callback(1.0)
-            return pd.DataFrame()
+        # Format user number
+        if user_num < 10:
+            df.insert(0, "User", '0' + str(user_num))
+        else:
+            df.insert(0, "User", str(user_num))
+
+        # Normalize start and end timestamps
+        start_timestamp = normalize_timestamp(start_timestamp)
+        end_timestamp = normalize_timestamp(end_timestamp)
         
+        # Normalize section timestamps
+        for section in section_data:
+            section['start'] = normalize_timestamp(section['start'])
+            section['end'] = normalize_timestamp(section['end'])
+            
+        # Remove the milliseconds from the 'TimeStamp' column
+        df['TimeStamp'] = df['TimeStamp'].str[:-4]
+        
+        # Filter by timestamp range
+        df = df[(df['TimeStamp'] >= start_timestamp) & (df['TimeStamp'] <= end_timestamp)]
+        
+        # Update progress
         if progress_callback:
-            progress_callback(0.8)  # 80% - Procesamiento principal completado
+            progress_callback(0.6)  # 60% complete
         
-        # FINALIZACIÓN
-        # Eliminar duplicados
-        df_final = df_final.drop_duplicates(subset=['TimeStamp'])
+        # Add Time column
+        if not df.empty:
+            df.insert(2, "Time", (pd.to_datetime(df['TimeStamp']) - pd.to_datetime(df['TimeStamp'].iloc[0]) + 
+                                 pd.to_datetime('0:00:01')).dt.strftime('%H:%M:%S.%f').str[:-3])
+        else:
+            return pd.DataFrame()  # Return empty DataFrame if filtered data is empty
         
-        # Convertir Time a formato de tiempo
+        # Create a copy for resampling
+        df_copy = df.copy()
+        
+        # Update progress
+        if progress_callback:
+            progress_callback(0.7)  # 70% complete
+        
+        # Convert Time to datetime and set as index
+        df_copy['Time'] = pd.to_datetime(df_copy['Time'])
+        df_copy.set_index('Time', inplace=True)
+        
+        # Select numeric columns for resampling
+        numeric_df = df_copy.select_dtypes(include=['float64', 'int64'])
+        numeric_df = numeric_df.resample('s').mean()
+        numeric_df.reset_index(inplace=True)
+        
+        # Select non-numeric columns for resampling
+        non_numeric_df = df_copy.select_dtypes(exclude=['float64', 'int64'])
+        non_numeric_df = non_numeric_df.resample('s').first()
+        non_numeric_df.reset_index(inplace=True)
+        
+        # Merge the resampled DataFrames
+        df_final = pd.merge(non_numeric_df, numeric_df, on='Time')
         df_final['Time'] = df_final['Time'].dt.time
         
-        # Organizar y ordenar
-        df_final.sort_values('TimeStamp', inplace=True)
-        df_final = df_final[['User', 'TimeStamp', 'Time'] + 
-                          [col for col in df_final.columns if col not in ['User', 'TimeStamp', 'Time']]]
+        # Update progress
+        if progress_callback:
+            progress_callback(0.8)  # 80% complete
         
-        # Agregar secciones si es necesario
+        # Organize columns
+        df_final = df_final[['User', 'TimeStamp', 'Time'] + 
+                           [col for col in df_final.columns if col not in ['User', 'TimeStamp', 'Time']]]
+        
+        # Add Section column based on user input (only if sections are included)
         if include_sections and section_data:
             df_final['Section'] = None
-            
-            # Procesar secciones por lotes para minimizar operaciones en memoria
             for section in section_data:
-                mask = (df_final['TimeStamp'] >= section['start']) & (df_final['TimeStamp'] <= section['end'])
-                df_final.loc[mask, 'Section'] = section['label']
+                df_final.loc[(df_final['TimeStamp'] >= section['start']) & 
+                             (df_final['TimeStamp'] <= section['end']), 'Section'] = section['label']
             
+            # Reorder columns to place 'Section' in the 3rd position
             cols = df_final.columns.tolist()
             cols.remove('Section')
             cols.insert(3, 'Section')
             df_final = df_final[cols]
         
-        # Eliminar NaNs
+        # Drop NaN values
         df_final = df_final.dropna()
         
+        # Update progress
         if progress_callback:
-            progress_callback(1.0)
+            progress_callback(1.0)  # 100% complete
         
         return df_final
     
     except Exception as e:
+        # Clean up in case of error
         if progress_callback:
-            progress_callback(1.0)
-        if 'resampled_data_buffer' in locals():
-            del resampled_data_buffer
-        if 'df_final' in locals() and df_final is not None:
-            del df_final
+            progress_callback(1.0)  # Complete the progress bar
         raise e
 
 if __name__ == "__main__":
