@@ -488,15 +488,11 @@ def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timesta
         else:
             df.insert(0, "User", str(user_num))
 
-        # Normalize start and end timestamps
-        start_timestamp = normalize_timestamp(start_timestamp)
-        end_timestamp = normalize_timestamp(end_timestamp)
-        
         # Normalize section timestamps
         for section in section_data:
             section['start'] = normalize_timestamp(section['start'])
             section['end'] = normalize_timestamp(section['end'])
-            
+                
         # Remove the milliseconds from the 'TimeStamp' column
         df['TimeStamp'] = df['TimeStamp'].str[:-4]
         
@@ -507,10 +503,11 @@ def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timesta
         if progress_callback:
             progress_callback(0.6)  # 60% complete
         
-        # Add Time column
+        # Add Time column with explicit format
         if not df.empty:
-            df.insert(2, "Time", (pd.to_datetime(df['TimeStamp']) - pd.to_datetime(df['TimeStamp'].iloc[0]) + 
-                                 pd.to_datetime('0:00:01')).dt.strftime('%H:%M:%S.%f').str[:-3])
+            df.insert(2, "Time", (pd.to_datetime(df['TimeStamp'], format="%Y-%m-%d %H:%M:%S") - 
+                                pd.to_datetime(df['TimeStamp'].iloc[0], format="%Y-%m-%d %H:%M:%S") + 
+                                pd.to_datetime('0:00:01')).dt.strftime('%H:%M:%S.%f').str[:-3])
         else:
             return pd.DataFrame()  # Return empty DataFrame if filtered data is empty
         
@@ -521,9 +518,10 @@ def process_eeg_data_in_chunks(file_path, user_num, start_timestamp, end_timesta
         if progress_callback:
             progress_callback(0.7)  # 70% complete
         
-        # Convert Time to datetime and set as index
-        df_copy['Time'] = pd.to_datetime(df_copy['Time'])
+        # Convert Time to datetime and set as index with explicit format
+        df_copy['Time'] = pd.to_datetime(df_copy['Time'], format="%H:%M:%S.%f")
         df_copy.set_index('Time', inplace=True)
+    
         
         # Select numeric columns for resampling
         numeric_df = df_copy.select_dtypes(include=['float64', 'int64'])
