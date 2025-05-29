@@ -5,6 +5,8 @@ import os
 import tempfile
 import datetime
 from io import StringIO
+import re
+from dateutil import parser
 
 # Configure page and increase file size limit
 st.set_page_config(
@@ -39,10 +41,57 @@ def main():
     with tab2:
         combine_multiple_users()
 
-def normalize_timestamp(timestamp_str):
+def detect_timestamp_format(sample_timestamp):
+    """
+    Detect the timestamp format from a sample timestamp string
+    Returns a pandas-compatible format string
+    """
+    if not sample_timestamp or not isinstance(sample_timestamp, str):
+        return None
+    
+    # Remove milliseconds if present (anything after decimal point)
+    timestamp_str = re.sub(r'\.\d+', '', sample_timestamp)
+    
+    # Try to parse the timestamp
+    try:
+        # Check if timestamp uses slashes (US or European format)
+        if '/' in timestamp_str:
+            parts = timestamp_str.split(' ')[0].split('/')
+            if len(parts) == 3:
+                # Check if first part is likely year (4 digits)
+                if len(parts[0]) == 4:  # yyyy/mm/dd format
+                    return "%Y/%m/%d %H:%M:%S"
+                elif len(parts[2]) == 4:  # mm/dd/yyyy or dd/mm/yyyy format
+                    # Heuristic: if first number > 12, it's likely dd/mm/yyyy
+                    if int(parts[0]) > 12:
+                        return "%d/%m/%Y %H:%M:%S"
+                    else:
+                        # Default to US format
+                        return "%m/%d/%Y %H:%M:%S"
+        # Check for ISO format with dashes
+        elif '-' in timestamp_str:
+            parts = timestamp_str.split(' ')[0].split('-')
+            if len(parts) == 3:
+                if len(parts[0]) == 4:  # yyyy-mm-dd format
+                    return "%Y-%m-%d %H:%M:%S"
+                elif len(parts[2]) == 4:  # dd-mm-yyyy or mm-dd-yyyy format
+                    # Heuristic: if first number > 12, it's likely dd-mm-yyyy
+                    if int(parts[0]) > 12:
+                        return "%d-%m-%Y %H:%M:%S"
+                    else:
+                        return "%m-%d-%Y %H:%M:%S"
+    except:
+        pass
+        
+    # If we can't determine a specific format, use dateutil's parser
+    # which is very flexible but slower
+    return None
+
+def normalize_timestamp(timestamp_str, reference_format=None):
     """
     Normalize timestamp format to ensure days, months, hours, minutes, seconds 
-    all have leading zeros when needed (i.e., 2025-5-4 9:10:34 -> 2025-05-04 09:10:34)
+    all have leading zeros when needed.
+    Uses reference_format if provided, otherwise tries to detect the format.
     """
     if not timestamp_str or not isinstance(timestamp_str, str):
         return timestamp_str
@@ -50,33 +99,19 @@ def normalize_timestamp(timestamp_str):
     # Strip any extra whitespace
     timestamp_str = timestamp_str.strip()
     
-    # Split into date and time parts
-    parts = timestamp_str.split(' ')
-    if len(parts) != 2:
-        return timestamp_str  # Return as-is if format doesn't match expected pattern
+    try:
+        # If we have a reference format, use it directly
+        if reference_format:
+            parsed_date = pd.to_datetime(timestamp_str, format=reference_format, errors='coerce')
+        else:
+            # Otherwise use the flexible parser
+            parsed_date = parser.parse(timestamp_str)
         
-    date_part, time_part = parts
-    
-    # Normalize date (yyyy-mm-dd)
-    date_components = date_part.split('-')
-    if len(date_components) == 3:
-        year, month, day = date_components
-        # Ensure month and day are 2 digits
-        month = month.zfill(2)
-        day = day.zfill(2)
-        date_part = f"{year}-{month}-{day}"
-    
-    # Normalize time (hh:mm:ss)
-    time_components = time_part.split(':')
-    if len(time_components) == 3:
-        hour, minute, second = time_components
-        # Ensure hour, minute, second are 2 digits
-        hour = hour.zfill(2)
-        minute = minute.zfill(2)
-        second = second.zfill(2)
-        time_part = f"{hour}:{minute}:{second}"
-    
-    return f"{date_part} {time_part}"
+        # Return standard ISO format with leading zeros
+        return parsed_date.strftime("%Y-%m-%d %H:%M:%S")
+    except:
+        # If parsing fails, return the original string
+        return timestamp_str
 
 def process_single_user():
     st.header("Single User Data Processing")
@@ -117,29 +152,74 @@ def process_single_user():
                 st.session_state.min_timestamp = ""
             if 'max_timestamp' not in st.session_state:
                 st.session_state.max_timestamp = ""
+            if 'timestamp_format' not in st.session_state:
+                st.session_state.timestamp_format = None
             
             # Extract timestamp range with a button
             if st.button("Detect Timestamp Range"):
                 with st.spinner("Detecting timestamp range..."):
                     try:
                         # Read first and last rows to get timestamp range
-                        df_head = pd.read_csv(st.session_state.tmp_path, nrows=1)
+                        df_head = pd.read_csv(st.session_state.tmp_path, nrows=10)
+                        
+                        # Check if 'TimeStamp' column exists
+                        if "TimeStamp" not in df_head.columns:
+                            st.error("No 'TimeStamp' column found in the data.")
+                            return
+                        
+                        # Get a sample timestamp to determine format
+                        sample_timestamp = None
+                        for idx, row in df_head.iterrows():
+                            if pd.notna(row["TimeStamp"]):
+                                sample_timestamp = row["TimeStamp"]
+                                break
+                        
+                        if not sample_timestamp:
+                            st.error("Could not find any valid timestamp in the data.")
+                            return
+                            
+                        # Detect timestamp format
+                        timestamp_format = detect_timestamp_format(sample_timestamp)
+                        st.session_state.timestamp_format = timestamp_format
+                        
+                        # Read tail rows
                         df_tail = pd.read_csv(st.session_state.tmp_path, skiprows=lambda x: x > 0 and x < os.path.getsize(st.session_state.tmp_path) - 10000)
                         
-                        min_timestamp = df_head["TimeStamp"].iloc[0] if "TimeStamp" in df_head.columns else ""
-                        max_timestamp = df_tail["TimeStamp"].iloc[-1] if "TimeStamp" in df_tail.columns else ""
+                        # Find first valid timestamp in head
+                        min_timestamp = None
+                        for idx, row in df_head.iterrows():
+                            if pd.notna(row["TimeStamp"]):
+                                min_timestamp = row["TimeStamp"]
+                                break
+                                
+                        # Find last valid timestamp in tail
+                        max_timestamp = None
+                        for idx in range(len(df_tail)-1, -1, -1):
+                            if pd.notna(df_tail["TimeStamp"].iloc[idx]):
+                                max_timestamp = df_tail["TimeStamp"].iloc[idx]
+                                break
                         
+                        if not min_timestamp or not max_timestamp:
+                            st.error("Could not detect valid timestamps in the data.")
+                            return
+                            
                         # Remove milliseconds if present
-                        min_timestamp = min_timestamp[:19] if isinstance(min_timestamp, str) else ""
-                        max_timestamp = max_timestamp[:19] if isinstance(max_timestamp, str) else ""
+                        min_timestamp = re.sub(r'\.\d+', '', min_timestamp) if isinstance(min_timestamp, str) else ""
+                        max_timestamp = re.sub(r'\.\d+', '', max_timestamp) if isinstance(max_timestamp, str) else ""
+                        
+                        # Normalize to standard format
+                        min_timestamp = normalize_timestamp(min_timestamp, reference_format=timestamp_format)
+                        max_timestamp = normalize_timestamp(max_timestamp, reference_format=timestamp_format)
                         
                         # Store in session state
                         st.session_state.min_timestamp = min_timestamp
                         st.session_state.max_timestamp = max_timestamp
                         
-                        st.success("Timestamp range detected!")
+                        st.success(f"Timestamp range detected! Format: {timestamp_format if timestamp_format else 'Auto-detected'}")
                     except Exception as e:
                         st.warning(f"Couldn't detect timestamp range: {e}")
+                        import traceback
+                        st.code(traceback.format_exc())
             
             # Timestamp range inputs
             st.subheader("Timestamp Range")
@@ -150,12 +230,12 @@ def process_single_user():
             col1, col2 = st.columns(2)
             with col1:
                 start_timestamp_input = st.text_input("Start timestamp (YYYY-MM-DD HH:MM:SS)", value=st.session_state.min_timestamp)
-                start_timestamp = normalize_timestamp(start_timestamp_input)
+                start_timestamp = normalize_timestamp(start_timestamp_input, reference_format=st.session_state.timestamp_format)
                 if start_timestamp != start_timestamp_input and start_timestamp_input:
                     st.info(f"Normalized timestamp: {start_timestamp}")
             with col2:
                 end_timestamp_input = st.text_input("End timestamp (YYYY-MM-DD HH:MM:SS)", value=st.session_state.max_timestamp)
-                end_timestamp = normalize_timestamp(end_timestamp_input)
+                end_timestamp = normalize_timestamp(end_timestamp_input, reference_format=st.session_state.timestamp_format)
                 if end_timestamp != end_timestamp_input and end_timestamp_input:
                     st.info(f"Normalized timestamp: {end_timestamp}")
             
@@ -181,14 +261,14 @@ def process_single_user():
                             value=start_timestamp_input,
                             key=f"start_{i}"
                         )
-                        section_start = normalize_timestamp(section_start_input)
+                        section_start = normalize_timestamp(section_start_input, reference_format=st.session_state.timestamp_format)
                     with col3:
                         section_end_input = st.text_input(
                             f"End time (YYYY-MM-DD HH:MM:SS)",
                             value=end_timestamp_input,
                             key=f"end_{i}"
                         )
-                        section_end = normalize_timestamp(section_end_input)
+                        section_end = normalize_timestamp(section_end_input, reference_format=st.session_state.timestamp_format)
                     
                     section_data.append({
                         "label": section_label,
@@ -209,6 +289,7 @@ def process_single_user():
                             start_timestamp, 
                             end_timestamp, 
                             section_data,
+                            timestamp_format=st.session_state.timestamp_format,
                             include_sections=define_sections,
                             progress_callback=lambda x: progress_bar.progress(x)
                         )
@@ -264,6 +345,8 @@ def process_single_user():
                     pass
 
 def combine_multiple_users():
+    # Existing combine_multiple_users function remains unchanged
+    # ... existing code ...
     st.header("Combine Multiple Preprocessed Datasets")
     
     st.write("""
@@ -369,7 +452,7 @@ def combine_multiple_users():
                     import traceback
                     st.code(traceback.format_exc())
 
-def process_eeg_data(file_path, user_num, start_timestamp, end_timestamp, section_data, include_sections=True, progress_callback=None):
+def process_eeg_data(file_path, user_num, start_timestamp, end_timestamp, section_data, timestamp_format=None, include_sections=True, progress_callback=None):
     """
     Process EEG data all at once (faster but requires more memory)
     """
@@ -387,23 +470,25 @@ def process_eeg_data(file_path, user_num, start_timestamp, end_timestamp, sectio
         
         # Filter data
         # Keep only the rows where 'Elements' is NaN
-        df = df[df['Elements'].isna()]
+        if 'Elements' in df.columns:
+            df = df[df['Elements'].isna()]
         
         # Keep only the first 25 columns if there are more
         if df.shape[1] > 25:
             df = df.iloc[:, :25]
         
         # Remove rows where all brainwave data values are zero
-        df = df[~((df['Delta_TP9'] == 0) & (df['Delta_AF7'] == 0) & 
-              (df['Delta_AF8'] == 0) & (df['Delta_TP10'] == 0) & 
-              (df['Theta_TP9'] == 0) & (df['Theta_AF7'] == 0) & 
-              (df['Theta_AF8'] == 0) & (df['Theta_TP10'] == 0) & 
-              (df['Alpha_TP9'] == 0) & (df['Alpha_AF7'] == 0) & 
-              (df['Alpha_AF8'] == 0) & (df['Alpha_TP10'] == 0) & 
-              (df['Beta_TP9'] == 0) & (df['Beta_AF7'] == 0) & 
-              (df['Beta_AF8'] == 0) & (df['Beta_TP10'] == 0) & 
-              (df['Gamma_TP9'] == 0) & (df['Gamma_AF7'] == 0) & 
-              (df['Gamma_AF8'] == 0) & (df['Gamma_TP10'] == 0))]
+        if all(col in df.columns for col in ['Delta_TP9', 'Delta_AF7', 'Delta_AF8', 'Delta_TP10']):
+            df = df[~((df['Delta_TP9'] == 0) & (df['Delta_AF7'] == 0) & 
+                (df['Delta_AF8'] == 0) & (df['Delta_TP10'] == 0) & 
+                (df['Theta_TP9'] == 0) & (df['Theta_AF7'] == 0) & 
+                (df['Theta_AF8'] == 0) & (df['Theta_TP10'] == 0) & 
+                (df['Alpha_TP9'] == 0) & (df['Alpha_AF7'] == 0) & 
+                (df['Alpha_AF8'] == 0) & (df['Alpha_TP10'] == 0) & 
+                (df['Beta_TP9'] == 0) & (df['Beta_AF7'] == 0) & 
+                (df['Beta_AF8'] == 0) & (df['Beta_TP10'] == 0) & 
+                (df['Gamma_TP9'] == 0) & (df['Gamma_AF7'] == 0) & 
+                (df['Gamma_AF8'] == 0) & (df['Gamma_TP10'] == 0))]
         
         # Update progress
         if progress_callback:
@@ -415,30 +500,34 @@ def process_eeg_data(file_path, user_num, start_timestamp, end_timestamp, sectio
         else:
             df.insert(0, "User", str(user_num))
 
-        # Normalize timestamps
-        start_timestamp = normalize_timestamp(start_timestamp)
-        end_timestamp = normalize_timestamp(end_timestamp)
-        
-        # Normalize section timestamps
-        for section in section_data:
-            section['start'] = normalize_timestamp(section['start'])
-            section['end'] = normalize_timestamp(section['end'])
-                
-        # Remove the milliseconds from the 'TimeStamp' column
-        df['TimeStamp'] = df['TimeStamp'].str[:-4]
-        
-        # Filter by timestamp range
-        df = df[(df['TimeStamp'] >= start_timestamp) & (df['TimeStamp'] <= end_timestamp)]
-        
+        # Remove the milliseconds from the 'TimeStamp' column and normalize
+        if 'TimeStamp' in df.columns:
+            # First remove milliseconds
+            df['TimeStamp'] = df['TimeStamp'].astype(str).apply(lambda x: re.sub(r'\.\d+', '', x))
+            
+            # Then normalize timestamps consistently
+            df['TimeStamp'] = df['TimeStamp'].apply(lambda x: normalize_timestamp(x, reference_format=timestamp_format))
+            
+            # Filter by timestamp range if both start and end are specified
+            if start_timestamp and end_timestamp:
+                df = df[(df['TimeStamp'] >= start_timestamp) & (df['TimeStamp'] <= end_timestamp)]
+            
         # Update progress
         if progress_callback:
             progress_callback(0.6)  # 60% - Time filtering complete
         
         # Add Time column with explicit format
-        if not df.empty:
-            df.insert(2, "Time", (pd.to_datetime(df['TimeStamp'], format="%Y-%m-%d %H:%M:%S") - 
-                                pd.to_datetime(df['TimeStamp'].iloc[0], format="%Y-%m-%d %H:%M:%S") + 
-                                pd.to_datetime('0:00:01')).dt.strftime('%H:%M:%S.%f').str[:-3])
+        if not df.empty and 'TimeStamp' in df.columns:
+            # Use consistent format for parsing timestamps
+            try:
+                df.insert(2, "Time", (pd.to_datetime(df['TimeStamp']) - 
+                                    pd.to_datetime(df['TimeStamp'].iloc[0]) + 
+                                    pd.to_datetime('0:00:01')).dt.strftime('%H:%M:%S.%f').str[:-3])
+            except Exception as e:
+                # Fallback - use dateutil parser which is more flexible
+                df.insert(2, "Time", (pd.to_datetime(df['TimeStamp'], errors='coerce') - 
+                                    pd.to_datetime(df['TimeStamp'].iloc[0], errors='coerce') + 
+                                    pd.to_datetime('0:00:01')).dt.strftime('%H:%M:%S.%f').str[:-3])
         else:
             return pd.DataFrame()  # Return empty DataFrame if filtered data is empty
         
@@ -450,7 +539,8 @@ def process_eeg_data(file_path, user_num, start_timestamp, end_timestamp, sectio
             progress_callback(0.7)  # 70% - Prepared for resampling
         
         # Convert Time to datetime and set as index with explicit format
-        df_copy['Time'] = pd.to_datetime(df_copy['Time'], format="%H:%M:%S.%f")
+        df_copy['Time'] = pd.to_datetime(df_copy['Time'], format="%H:%M:%S.%f", errors='coerce')
+        df_copy = df_copy.dropna(subset=['Time'])  # Remove rows with invalid times
         df_copy.set_index('Time', inplace=True)
         
         # Select numeric columns for resampling
