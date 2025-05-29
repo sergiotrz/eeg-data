@@ -1,4 +1,4 @@
-import streamlit as st
+ import streamlit as st
 import pandas as pd
 import numpy as np
 import os
@@ -72,7 +72,7 @@ def detect_timestamp_format(sample_timestamp):
         elif '-' in timestamp_str:
             parts = timestamp_str.split(' ')[0].split('-')
             if len(parts) == 3:
-                if len(parts[0]) == 4:  # yyyy-mm-dd format
+                if len(parts[0]) == 4:  # yyyy-mm-dd format (ISO standard)
                     return "%Y-%m-%d %H:%M:%S"
                 elif len(parts[2]) == 4:  # dd-mm-yyyy or mm-dd-yyyy format
                     # Heuristic: if first number > 12, it's likely dd-mm-yyyy
@@ -80,6 +80,9 @@ def detect_timestamp_format(sample_timestamp):
                         return "%d-%m-%Y %H:%M:%S"
                     else:
                         return "%m-%d-%Y %H:%M:%S"
+                # Additional check for yyyy-dd-mm format (non-standard but possible)
+                elif len(parts[0]) == 4 and int(parts[1]) > 12:
+                    return "%Y-%d-%m %H:%M:%S"
     except:
         pass
         
@@ -100,15 +103,28 @@ def normalize_timestamp(timestamp_str, reference_format=None):
     timestamp_str = timestamp_str.strip()
     
     try:
+        # Try to detect the format if none provided
+        if not reference_format:
+            reference_format = detect_timestamp_format(timestamp_str)
+            
         # If we have a reference format, use it directly
         if reference_format:
             parsed_date = pd.to_datetime(timestamp_str, format=reference_format, errors='coerce')
         else:
-            # Otherwise use the flexible parser
-            parsed_date = parser.parse(timestamp_str)
+            # Otherwise use the flexible parser with multiple attempts
+            try:
+                # Try with dateutil parser first
+                parsed_date = parser.parse(timestamp_str)
+            except:
+                # If that fails, try pandas to_datetime with inferred format
+                parsed_date = pd.to_datetime(timestamp_str, errors='coerce')
         
-        # Return standard ISO format with leading zeros
-        return parsed_date.strftime("%Y-%m-%d %H:%M:%S")
+        # If we got a valid date, return standard ISO format
+        if pd.notna(parsed_date):
+            return parsed_date.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            # If parsing fails completely, return the original string
+            return timestamp_str
     except:
         # If parsing fails, return the original string
         return timestamp_str
@@ -159,18 +175,23 @@ def process_single_user():
             if st.button("Detect Timestamp Range"):
                 with st.spinner("Detecting timestamp range..."):
                     try:
-                        # Read first and last rows to get timestamp range
-                        df_head = pd.read_csv(st.session_state.tmp_path, nrows=10)
+                        # Read first rows to get timestamp range
+                        df_head = pd.read_csv(st.session_state.tmp_path, nrows=20)
                         
                         # Check if 'TimeStamp' column exists
                         if "TimeStamp" not in df_head.columns:
                             st.error("No 'TimeStamp' column found in the data.")
                             return
                         
+                        # Check if DataFrame is not empty
+                        if df_head.empty:
+                            st.error("CSV file appears to be empty.")
+                            return
+                            
                         # Get a sample timestamp to determine format
                         sample_timestamp = None
                         for idx, row in df_head.iterrows():
-                            if pd.notna(row["TimeStamp"]):
+                            if pd.notna(row.get("TimeStamp")):
                                 sample_timestamp = row["TimeStamp"]
                                 break
                         
@@ -182,22 +203,45 @@ def process_single_user():
                         timestamp_format = detect_timestamp_format(sample_timestamp)
                         st.session_state.timestamp_format = timestamp_format
                         
-                        # Read tail rows
-                        df_tail = pd.read_csv(st.session_state.tmp_path, skiprows=lambda x: x > 0 and x < os.path.getsize(st.session_state.tmp_path) - 10000)
+                        # Read some rows from end of file more safely
+                        file_size = os.path.getsize(st.session_state.tmp_path)
+                        skip_rows = max(0, file_size - 100000)  # Read last ~100KB of file
+                        
+                        try:
+                            # Try to read tail with skiprows lambda
+                            df_tail = pd.read_csv(st.session_state.tmp_path, 
+                                                skiprows=lambda x: x > 0 and x < skip_rows)
+                        except:
+                            # If that fails, try to read the last 100 rows directly
+                            try:
+                                # Read full file but just get last 100 rows
+                                df_full = pd.read_csv(st.session_state.tmp_path)
+                                if len(df_full) > 100:
+                                    df_tail = df_full.tail(100)
+                                else:
+                                    df_tail = df_full
+                            except:
+                                # If all else fails, use the header data as tail too
+                                df_tail = df_head
                         
                         # Find first valid timestamp in head
                         min_timestamp = None
                         for idx, row in df_head.iterrows():
-                            if pd.notna(row["TimeStamp"]):
+                            if pd.notna(row.get("TimeStamp")):
                                 min_timestamp = row["TimeStamp"]
                                 break
                                 
                         # Find last valid timestamp in tail
                         max_timestamp = None
-                        for idx in range(len(df_tail)-1, -1, -1):
-                            if pd.notna(df_tail["TimeStamp"].iloc[idx]):
-                                max_timestamp = df_tail["TimeStamp"].iloc[idx]
-                                break
+                        if not df_tail.empty and "TimeStamp" in df_tail.columns:
+                            for i in range(len(df_tail)-1, -1, -1):
+                                if i < len(df_tail) and pd.notna(df_tail["TimeStamp"].iloc[i]):
+                                    max_timestamp = df_tail["TimeStamp"].iloc[i]
+                                    break
+                        
+                        # If we couldn't find a max_timestamp in tail, use the last one from head
+                        if not max_timestamp and not df_head.empty:
+                            max_timestamp = df_head["TimeStamp"].iloc[-1]
                         
                         if not min_timestamp or not max_timestamp:
                             st.error("Could not detect valid timestamps in the data.")
@@ -216,6 +260,7 @@ def process_single_user():
                         st.session_state.max_timestamp = max_timestamp
                         
                         st.success(f"Timestamp range detected! Format: {timestamp_format if timestamp_format else 'Auto-detected'}")
+                        
                     except Exception as e:
                         st.warning(f"Couldn't detect timestamp range: {e}")
                         import traceback
