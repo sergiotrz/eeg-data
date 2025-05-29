@@ -185,112 +185,101 @@ def process_single_user():
                         
                         # Check if DataFrame is not empty (initially)
                         if df_head_raw.empty:
-                            st.error("CSV file header appears to be empty.")
+                            st.error("CSV file appears to be empty.")
                             return
                         
-                        st.info(f"Read {len(df_head_raw)} rows in the file header.")
+                        # Display number of rows for debugging
+                        st.info(f"Found {len(df_head_raw)} rows in the file header")
                         
                         # Filter out rows where TimeStamp is NaN or empty string
-                        df_head_filtered = df_head_raw[df_head_raw["TimeStamp"].notna() & (df_head_raw["TimeStamp"] != "")]
+                        df_head = df_head_raw[df_head_raw["TimeStamp"].notna() & (df_head_raw["TimeStamp"] != "")]
                         
-                        if df_head_filtered.empty:
-                            st.error("No valid timestamps found in the first 100 rows after filtering.")
+                        # Check if we have any valid timestamps after filtering
+                        if df_head.empty:
+                            st.error("No valid timestamps found in the data after filtering.")
                             return
                         
                         # Safely get the first valid timestamp
-                        first_valid_timestamp_val = ""
                         try:
-                            # Use the filtered DataFrame
-                            first_valid_timestamp_val = df_head_filtered["TimeStamp"].iloc[0] 
+                            sample_timestamp = df_head["TimeStamp"].iloc[0]
+                            st.info(f"Sample timestamp found: {sample_timestamp}")
                         except IndexError:
-                            st.error("Failed to extract first valid timestamp from header data (IndexError). This should not happen if previous checks passed.")
+                            st.error("Failed to extract valid timestamp from data (IndexError).")
                             return
-                        except Exception as e_sample_ts:
-                            st.error(f"Unexpected error extracting first timestamp: {e_sample_ts}")
+                        except Exception as e:
+                            st.error(f"Failed to extract valid timestamp: {e}")
                             return
-                        
-                        st.info(f"Sample timestamp found: {first_valid_timestamp_val}")
                         
                         # Detect timestamp format
-                        timestamp_format = detect_timestamp_format(first_valid_timestamp_val)
+                        timestamp_format = detect_timestamp_format(sample_timestamp)
                         st.session_state.timestamp_format = timestamp_format
                         
-                        # Initialize min and max timestamps using the first valid one
-                        min_val = first_valid_timestamp_val
-                        max_val = first_valid_timestamp_val # Default max to min initially
+                        # Set default values from the first timestamp we found
+                        min_timestamp = sample_timestamp
+                        max_timestamp = sample_timestamp
                         
                         # Try to read the end of the file for the last timestamp
-                        df_tail_source = pd.DataFrame() 
                         try:
+                            # Try to read just the last part of the file for efficiency
                             file_size = os.path.getsize(st.session_state.tmp_path)
                             
+                            # If file is small, read it all
                             if file_size < 5 * 1024 * 1024:  # 5 MB
-                                df_tail_source = pd.read_csv(st.session_state.tmp_path)
+                                df_tail = pd.read_csv(st.session_state.tmp_path)
                             else:
-                                # For large files, the original logic attempted to read header + last 100 lines.
-                                # This can be complex. A robust fallback is to use df_head_filtered if tail read is problematic.
-                                # For simplicity and robustness, if reading tail is complex or fails,
-                                # we'll use the already processed header data (df_head_filtered) as a source for the tail.
-                                # This might not always give the true last timestamp for very large files if it differs significantly from header.
-                                st.info("For large files, attempting to read tail. If issues occur, max timestamp might be based on header data.")
+                                # For large files, read first few rows to get headers
+                                df_headers = pd.read_csv(st.session_state.tmp_path, nrows=1)
+                                column_names = df_headers.columns.tolist()
+                                
+                                # Then read the last 100 rows (skip everything except the last chunk)
                                 try:
-                                    # Re-implementing a simplified version of original tail read attempt
-                                    df_headers_for_tail = pd.read_csv(st.session_state.tmp_path, nrows=1)
-                                    column_names_for_tail = df_headers_for_tail.columns.tolist()
-                                    
-                                    # Estimate line count (can be slow)
-                                    line_count_for_tail = 0
-                                    with open(st.session_state.tmp_path, 'rb') as f_count_tail:
-                                        line_count_for_tail = sum(1 for _ in f_count_tail)
-
-                                    if line_count_for_tail > 101: # If enough lines for header + 100 data
-                                        # Skip rows to get to the last 100 data lines + header
-                                        # skiprows needs a list of row numbers (0-indexed) or count from start
-                                        # The original lambda: skiprows = lambda x: 1 <= x < max(1, line_count_for_tail - 100)
-                                        # This means it skips rows from index 1 up to line_count_for_tail - 101.
-                                        # So it reads row 0 (header) and rows from (line_count_for_tail - 100) onwards.
-                                        skip_up_to = max(1, line_count_for_tail - 100)
-                                        if skip_up_to > 1: # only skip if there are rows to skip after header
-                                             df_tail_source = pd.read_csv(st.session_state.tmp_path, skiprows=range(1, skip_up_to), names=column_names_for_tail, header=None if column_names_for_tail else 0)
-                                        else: # read whole file if not enough rows to skip meaningfully
-                                             df_tail_source = pd.read_csv(st.session_state.tmp_path)
-
-                                    else: # File not large enough for complex skip logic
-                                        df_tail_source = pd.read_csv(st.session_state.tmp_path)
-                                except Exception as e_large_tail:
-                                    st.warning(f"Error during large file tail read ({e_large_tail}). Using header data for max timestamp.")
-                                    df_tail_source = df_head_filtered.copy()
-
-
-                        except Exception as e_read_tail:
-                            st.warning(f"Couldn't read file tail ({e_read_tail}), using header data for end timestamp.")
-                            df_tail_source = df_head_filtered.copy() # Use filtered head data as a fallback
+                                    # Count total lines first
+                                    line_count = sum(1 for _ in open(st.session_state.tmp_path))
+                                    if line_count > 101:  # Header + 100 data rows minimum
+                                        skiprows = lambda x: 1 <= x < max(1, line_count - 100)
+                                        df_tail = pd.read_csv(st.session_state.tmp_path, skiprows=skiprows, names=column_names)
+                                    else:
+                                        # File too small, just read it all
+                                        df_tail = pd.read_csv(st.session_state.tmp_path)
+                                except:
+                                    st.warning("Couldn't count lines, reading whole file")
+                                    df_tail = pd.read_csv(st.session_state.tmp_path)
+                        except Exception as e_tail:
+                            st.warning(f"Couldn't read file tail ({e_tail}), using header data for end timestamp")
+                            df_tail = df_head.copy()
                         
-                        if not df_tail_source.empty and "TimeStamp" in df_tail_source.columns:
-                            df_tail_filtered_for_max = df_tail_source[df_tail_source["TimeStamp"].notna() & (df_tail_source["TimeStamp"] != "")]
-                            if not df_tail_filtered_for_max.empty:
-                                try:
-                                    max_val = df_tail_filtered_for_max["TimeStamp"].iloc[-1]
-                                except IndexError:
-                                    st.warning("IndexError when getting last timestamp from tail. Max timestamp will be based on header.")
-                                    # max_val remains as first_valid_timestamp_val
-                                except Exception as e_max_ts:
-                                    st.warning(f"Error getting last timestamp from tail ({e_max_ts}). Max timestamp will be based on header.")
-                            else:
-                                st.info("No valid timestamps found in tail data after filtering. Max timestamp will be based on header.")
-                        else:
-                             st.info("Tail data source empty or TimeStamp column missing. Max timestamp will be based on header.")
+                        # Filter out rows where TimeStamp is NaN or empty in tail data
+                        if "TimeStamp" in df_tail.columns:
+                            df_tail = df_tail[df_tail["TimeStamp"].notna() & (df_tail["TimeStamp"] != "")]
+                        
+                        # Find first valid timestamp in head (already validated above)
+                        min_timestamp = df_head["TimeStamp"].iloc[0]
+                        
+                        # Find last valid timestamp in tail
+                        if not df_tail.empty and "TimeStamp" in df_tail.columns:
+                            try:
+                                max_timestamp = df_tail["TimeStamp"].iloc[-1]
+                            except IndexError:
+                                st.warning("Couldn't get last timestamp from tail, using first timestamp as last")
+                                # Keep max_timestamp as min_timestamp (already set above)
+                            except Exception as e_max:
+                                st.warning(f"Error getting last timestamp: {e_max}, using first timestamp as last")
+                                # Keep max_timestamp as min_timestamp (already set above)
                         
                         # Debug timestamps
-                        st.info(f"Raw timestamps for normalization - Min: {min_val}, Max: {max_val}")
+                        st.info(f"Raw timestamps - Min: {min_timestamp}, Max: {max_timestamp}")
                         
                         # Remove milliseconds if present
-                        min_timestamp_str = re.sub(r'\.\d+', '', str(min_val))
-                        max_timestamp_str = re.sub(r'\.\d+', '', str(max_val))
+                        min_timestamp = re.sub(r'\.\d+', '', str(min_timestamp))
+                        max_timestamp = re.sub(r'\.\d+', '', str(max_timestamp))
                         
                         # Normalize to standard format
-                        st.session_state.min_timestamp = normalize_timestamp(min_timestamp_str, reference_format=timestamp_format)
-                        st.session_state.max_timestamp = normalize_timestamp(max_timestamp_str, reference_format=timestamp_format)
+                        min_timestamp = normalize_timestamp(min_timestamp, reference_format=timestamp_format)
+                        max_timestamp = normalize_timestamp(max_timestamp, reference_format=timestamp_format)
+                        
+                        # Store in session state
+                        st.session_state.min_timestamp = min_timestamp
+                        st.session_state.max_timestamp = max_timestamp
                         
                         st.success(f"Timestamp range detected! Format: {timestamp_format if timestamp_format else 'Auto-detected'}")
                         
