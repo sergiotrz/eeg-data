@@ -175,8 +175,8 @@ def process_single_user():
             if st.button("Detect Timestamp Range"):
                 with st.spinner("Detecting timestamp range..."):
                     try:
-                        # Read first rows to get timestamp range
-                        df_head = pd.read_csv(st.session_state.tmp_path, nrows=20)
+                        # Read first rows without filtering
+                        df_head = pd.read_csv(st.session_state.tmp_path, nrows=50)
                         
                         # Check if 'TimeStamp' column exists
                         if "TimeStamp" not in df_head.columns:
@@ -187,69 +187,60 @@ def process_single_user():
                         if df_head.empty:
                             st.error("CSV file appears to be empty.")
                             return
-                            
-                        # Get a sample timestamp to determine format
-                        sample_timestamp = None
-                        for idx, row in df_head.iterrows():
-                            if pd.notna(row.get("TimeStamp")):
-                                sample_timestamp = row["TimeStamp"]
-                                break
                         
-                        if not sample_timestamp:
-                            st.error("Could not find any valid timestamp in the data.")
+                        # Display number of rows for debugging
+                        st.info(f"Found {len(df_head)} rows in the file header")
+                            
+                        # Get a sample timestamp to determine format - be more robust
+                        valid_timestamps = df_head["TimeStamp"].dropna().tolist()
+                        
+                        if not valid_timestamps:
+                            st.error("Could not find any valid timestamps in the data.")
                             return
                             
+                        sample_timestamp = valid_timestamps[0]
+                        
+                        # Debug the sample timestamp
+                        st.info(f"Sample timestamp found: {sample_timestamp}")
+                        
                         # Detect timestamp format
                         timestamp_format = detect_timestamp_format(sample_timestamp)
                         st.session_state.timestamp_format = timestamp_format
                         
-                        # Read some rows from end of file more safely
-                        file_size = os.path.getsize(st.session_state.tmp_path)
-                        skip_rows = max(0, file_size - 100000)  # Read last ~100KB of file
-                        
+                        # Try to read the last rows
                         try:
-                            # Try to read tail with skiprows lambda
-                            df_tail = pd.read_csv(st.session_state.tmp_path, 
-                                                skiprows=lambda x: x > 0 and x < skip_rows)
+                            # Read the last portion of the file directly
+                            df_full = pd.read_csv(st.session_state.tmp_path)
+                            if len(df_full) > 50:
+                                df_tail = df_full.tail(50)
+                            else:
+                                df_tail = df_full
                         except:
-                            # If that fails, try to read the last 100 rows directly
-                            try:
-                                # Read full file but just get last 100 rows
-                                df_full = pd.read_csv(st.session_state.tmp_path)
-                                if len(df_full) > 100:
-                                    df_tail = df_full.tail(100)
-                                else:
-                                    df_tail = df_full
-                            except:
-                                # If all else fails, use the header data as tail too
-                                df_tail = df_head
+                            # If all else fails, use the header data
+                            st.warning("Couldn't read file tail, using header data for end timestamp")
+                            df_tail = df_head
                         
-                        # Find first valid timestamp in head
-                        min_timestamp = None
-                        for idx, row in df_head.iterrows():
-                            if pd.notna(row.get("TimeStamp")):
-                                min_timestamp = row["TimeStamp"]
-                                break
-                                
-                        # Find last valid timestamp in tail
-                        max_timestamp = None
-                        if not df_tail.empty and "TimeStamp" in df_tail.columns:
-                            for i in range(len(df_tail)-1, -1, -1):
-                                if i < len(df_tail) and pd.notna(df_tail["TimeStamp"].iloc[i]):
-                                    max_timestamp = df_tail["TimeStamp"].iloc[i]
-                                    break
-                        
-                        # If we couldn't find a max_timestamp in tail, use the last one from head
-                        if not max_timestamp and not df_head.empty:
-                            max_timestamp = df_head["TimeStamp"].iloc[-1]
-                        
-                        if not min_timestamp or not max_timestamp:
-                            st.error("Could not detect valid timestamps in the data.")
+                        # Find first valid timestamp in head using safe approach
+                        valid_head_timestamps = df_head["TimeStamp"].dropna().tolist()
+                        if valid_head_timestamps:
+                            min_timestamp = valid_head_timestamps[0]
+                        else:
+                            st.error("No valid starting timestamp found")
                             return
                             
+                        # Find last valid timestamp in tail using safe approach
+                        valid_tail_timestamps = df_tail["TimeStamp"].dropna().tolist()
+                        if valid_tail_timestamps:
+                            max_timestamp = valid_tail_timestamps[-1]
+                        else:
+                            max_timestamp = min_timestamp
+                        
+                        # Debug timestamps
+                        st.info(f"Raw timestamps - Min: {min_timestamp}, Max: {max_timestamp}")
+                            
                         # Remove milliseconds if present
-                        min_timestamp = re.sub(r'\.\d+', '', min_timestamp) if isinstance(min_timestamp, str) else ""
-                        max_timestamp = re.sub(r'\.\d+', '', max_timestamp) if isinstance(max_timestamp, str) else ""
+                        min_timestamp = re.sub(r'\.\d+', '', str(min_timestamp))
+                        max_timestamp = re.sub(r'\.\d+', '', str(max_timestamp))
                         
                         # Normalize to standard format
                         min_timestamp = normalize_timestamp(min_timestamp, reference_format=timestamp_format)
